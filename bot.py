@@ -54,8 +54,18 @@ def voe_upload_bytes(file_bytes, filename):
             files={"file": (filename, file_bytes)},
             timeout=600
         )
-        data = r.json()
+
+        # FIX: Empty response check
+        if not r.text.strip():
+            return None, "VoE empty response (upload)"
+
+        try:
+            data = r.json()
+        except Exception:
+            return None, "VoE invalid JSON: {}".format(r.text[:200])
+
         logger.info("VoE direct: {}".format(data))
+
         if data.get("status") == 200 or data.get("success"):
             files = data.get("files") or []
             if files:
@@ -64,7 +74,9 @@ def voe_upload_bytes(file_bytes, filename):
                 fc = data.get("file_code") or data.get("filecode") or ""
             if fc:
                 return "https://voe.sx/{}".format(fc), None
+
         return None, "VoE response: {}".format(data)
+
     except Exception as e:
         logger.error("VoE direct: {}".format(e))
         return None, str(e)
@@ -77,28 +89,55 @@ def voe_remote_upload(direct_url, filename):
             params={"key": VOE_KEY, "url": direct_url, "name": filename},
             timeout=30
         )
-        data = r.json()
+
+        # FIX: Empty response check
+        if not r.text.strip():
+            return None, "VoE empty response (remote start)"
+
+        try:
+            data = r.json()
+        except Exception:
+            return None, "VoE invalid JSON (start): {}".format(r.text[:200])
+
         logger.info("VoE remote start: {}".format(data))
+
         if not data.get("status"):
             return None, "VoE start fail: {}".format(data)
+
         file_code = data.get("file_code") or data.get("filecode")
         if not file_code:
             return None, "file_code nahi mila"
+
         for i in range(120):
             time.sleep(5)
-            sr = requests.get(
-                "https://voe.sx/api/upload/url/status",
-                params={"key": VOE_KEY, "file_code": file_code},
-                timeout=15
-            )
-            sd = sr.json()
+            try:
+                sr = requests.get(
+                    "https://voe.sx/api/upload/url/status",
+                    params={"key": VOE_KEY, "file_code": file_code},
+                    timeout=15
+                )
+
+                # FIX: Status response bhi safely parse karo
+                if not sr.text.strip():
+                    logger.warning("Empty status response, retrying... ({})".format(i))
+                    continue
+
+                sd = sr.json()
+
+            except Exception as e:
+                logger.warning("Status parse fail {}: {}".format(i, e))
+                continue
+
             logger.info("VoE status {}: {}".format(i, sd))
             s = str(sd.get("status", "")).lower()
+
             if s == "done" or sd.get("completed") or s == "200":
                 return "https://voe.sx/{}".format(file_code), None
             elif s in ["error", "failed", "404"]:
                 return None, "VoE fail: {}".format(sd)
-        return None, "VoE timeout"
+
+        return None, "VoE timeout (10 min)"
+
     except Exception as e:
         logger.error("VoE remote: {}".format(e))
         return None, str(e)
@@ -189,7 +228,6 @@ async def reset(client, message: Message):
     user_id = message.from_user.id
     if user_id in sessions:
         s = sessions[user_id]
-        # Final summary do
         if s["links"]:
             links_text = "📋 All Links:\n"
             for item in s["links"]:
@@ -225,20 +263,17 @@ async def handle_file(client, message: Message):
 
     size_mb = round(size / 1024 / 1024, 1)
 
-    # Size check
     if size > LIMIT_BYTES:
         await message.reply("❌ File {}MB ki hai. Limit 500MB hai.".format(size_mb))
         return
 
-    # Session info
     session_info = ""
+    ep_num = None
     if user_id in sessions:
         s = sessions[user_id]
         s["ep_count"] += 1
         ep_num = s["ep_count"]
         session_info = "\n🎬 {}\n📺 S{} EP{}".format(s["slug"], s["season"], ep_num)
-    else:
-        ep_num = None
 
     wait = await message.reply(
         "📥 File mili!\n📁 {}\n📦 {}MB{}\n\nShuru ho raha hai...".format(filename, size_mb, session_info)
@@ -289,7 +324,6 @@ async def handle_file(client, message: Message):
             voe_link, err = await loop.run_in_executor(None, voe_upload_bytes, file_bytes, filename)
 
         if voe_link:
-            # Session mein save karo
             if user_id in sessions and ep_num:
                 sessions[user_id]["links"].append({"ep": ep_num, "link": voe_link})
 

@@ -1,17 +1,15 @@
 import os
 import requests
 import logging
-from flask import Flask, request as freq
-import telebot
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SPACE_URL = os.environ.get("SPACE_URL", "").rstrip("/")
-
-bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
 
 
 def upload_to_gofile(file_bytes, filename):
@@ -21,7 +19,7 @@ def upload_to_gofile(file_bytes, filename):
         r2 = requests.post(
             "https://{}.gofile.io/uploadFile".format(server),
             files={"file": (filename, file_bytes)},
-            timeout=120
+            timeout=300
         )
         data = r2.json()
         if data.get("status") == "ok":
@@ -37,7 +35,7 @@ def upload_to_fileio(file_bytes, filename):
             "https://file.io",
             files={"file": (filename, file_bytes)},
             data={"expires": "1d", "maxDownloads": 100},
-            timeout=120
+            timeout=300
         )
         data = r.json()
         if data.get("success"):
@@ -47,94 +45,72 @@ def upload_to_fileio(file_bytes, filename):
     return None
 
 
-def get_file_info(message):
+app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+
+@app.on_message(filters.command("start"))
+async def start(client, message: Message):
+    await message.reply("👋 Hello! Koi bhi file bhejo — download link bana dunga! 🔗\n\n2GB tak files support hain!")
+
+
+@app.on_message(filters.video | filters.document | filters.audio | filters.photo | filters.voice | filters.video_note)
+async def handle_file(client, message: Message):
     if message.video:
-        f = message.video
-        return f.file_id, f.file_unique_id, "video_{}.mp4".format(f.file_unique_id), f.file_size or 0
+        media = message.video
+        filename = "video_{}.mp4".format(media.file_unique_id)
+        size = media.file_size or 0
     elif message.document:
-        f = message.document
-        return f.file_id, f.file_unique_id, f.file_name or "doc_{}".format(f.file_unique_id), f.file_size or 0
+        media = message.document
+        filename = media.file_name or "doc_{}".format(media.file_unique_id)
+        size = media.file_size or 0
     elif message.audio:
-        f = message.audio
-        return f.file_id, f.file_unique_id, "audio_{}.mp3".format(f.file_unique_id), f.file_size or 0
+        media = message.audio
+        filename = media.file_name or "audio_{}.mp3".format(media.file_unique_id)
+        size = media.file_size or 0
     elif message.photo:
-        f = message.photo[-1]
-        return f.file_id, f.file_unique_id, "photo_{}.jpg".format(f.file_unique_id), f.file_size or 0
+        media = message.photo
+        filename = "photo_{}.jpg".format(media.file_unique_id)
+        size = media.file_size or 0
     elif message.voice:
-        f = message.voice
-        return f.file_id, f.file_unique_id, "voice_{}.ogg".format(f.file_unique_id), f.file_size or 0
+        media = message.voice
+        filename = "voice_{}.ogg".format(media.file_unique_id)
+        size = media.file_size or 0
     elif message.video_note:
-        f = message.video_note
-        return f.file_id, f.file_unique_id, "vnote_{}.mp4".format(f.file_unique_id), f.file_size or 0
-    return None, None, None, 0
-
-
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.reply_to(message, "👋 Hello! File ya video bhejo, main download link bana dunga! 🔗")
-
-
-@bot.message_handler(content_types=["video", "document", "audio", "photo", "voice", "video_note"])
-def handle_file(message):
-    file_id, unique_id, filename, size = get_file_info(message)
-    if not file_id:
-        bot.reply_to(message, "Ye file type support nahi hai.")
+        media = message.video_note
+        filename = "vnote_{}.mp4".format(media.file_unique_id)
+        size = media.file_size or 0
+    else:
         return
 
     size_mb = round(size / 1024 / 1024, 1)
-    wait = bot.reply_to(message, "File mili: {}\nSize: {}MB\nLink bana raha hoon...".format(filename, size_mb))
 
-    if size > 20 * 1024 * 1024:
-        bot.edit_message_text(
-            "File {}MB ki hai. Bot API 20MB se badi files allow nahi karta.".format(size_mb),
-            message.chat.id, wait.message_id
-        )
-        return
+    wait = await message.reply(
+        "File mili: {}\nSize: {}MB\n\nDownload kar raha hoon...".format(filename, size_mb)
+    )
 
     try:
-        file_info = bot.get_file(file_id)
-        file_bytes = bot.download_file(file_info.file_path)
+        file_bytes = await client.download_media(message, in_memory=True)
+        file_bytes = bytes(file_bytes.getvalue())
 
-        bot.edit_message_text("Upload ho raha hai...", message.chat.id, wait.message_id)
+        await wait.edit("Upload ho raha hai gofile pe... ({}MB)".format(size_mb))
         link = upload_to_gofile(file_bytes, filename)
 
         if not link:
-            bot.edit_message_text("Backup try kar raha hoon...", message.chat.id, wait.message_id)
+            await wait.edit("Backup server try kar raha hoon...")
             link = upload_to_fileio(file_bytes, filename)
 
         if link:
-            bot.edit_message_text(
-                "Done!\n\nDownload Link:\n{}\n\nFile: {} - {}MB".format(link, filename, size_mb),
-                message.chat.id, wait.message_id
+            await wait.edit(
+                "Done!\n\nDownload Link:\n{}\n\nFile: {} - {}MB".format(link, filename, size_mb)
             )
         else:
-            bot.edit_message_text("Upload fail. Dobara try karo.", message.chat.id, wait.message_id)
+            await wait.edit("Upload fail. Dobara try karo.")
 
     except Exception as e:
         logger.error("Error: {}".format(e))
-        bot.edit_message_text("Error: {}".format(str(e)[:200]), message.chat.id, wait.message_id)
-
-
-@app.route("/{}".format(BOT_TOKEN), methods=["POST"])
-def webhook():
-    update = telebot.types.Update.de_json(freq.get_json())
-    bot.process_new_updates([update])
-    return "OK", 200
-
-
-@app.route("/")
-def index():
-    return "Bot is running!", 200
+        await wait.edit("Error: {}".format(str(e)[:300]))
 
 
 if __name__ == "__main__":
-    if SPACE_URL:
-        webhook_url = "{}/{}".format(SPACE_URL, BOT_TOKEN)
-        bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
-        logger.info("Webhook set: {}".format(webhook_url))
-        app.run(host="0.0.0.0", port=7860)
-    else:
-        logger.info("Polling mode")
-        bot.remove_webhook()
-        bot.infinity_polling()
+    logger.info("Bot start ho raha hai...")
+    app.run()

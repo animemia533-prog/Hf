@@ -14,7 +14,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 VOE_KEY = os.environ.get("VOE_KEY", "")
 
 
-def get_file_path_via_api(file_id):
+def get_telegram_url(file_id):
     try:
         r = requests.get(
             "https://api.telegram.org/bot{}/getFile".format(BOT_TOKEN),
@@ -22,14 +22,33 @@ def get_file_path_via_api(file_id):
             timeout=30
         )
         data = r.json()
-        logger.info("getFile response: {}".format(data))
+        logger.info("getFile: {}".format(data))
         if data.get("ok"):
-            file_path = data["result"]["file_path"]
-            return "https://api.telegram.org/file/bot{}/{}".format(BOT_TOKEN, file_path)
+            return "https://api.telegram.org/file/bot{}/{}".format(BOT_TOKEN, data["result"]["file_path"])
         return None
     except Exception as e:
         logger.error("getFile error: {}".format(e))
         return None
+
+
+def upload_to_tmpfiles(file_bytes, filename):
+    try:
+        r = requests.post(
+            "https://tmpfiles.org/api/v1/upload",
+            files={"file": (filename, file_bytes)},
+            timeout=300
+        )
+        data = r.json()
+        logger.info("tmpfiles: {}".format(data))
+        if data.get("status") == "success":
+            # tmpfiles URL ko direct URL mein convert karo
+            page_url = data["data"]["url"]
+            # https://tmpfiles.org/1234/file.mp4 -> https://tmpfiles.org/dl/1234/file.mp4
+            direct_url = page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+            return direct_url
+    except Exception as e:
+        logger.error("tmpfiles: {}".format(e))
+    return None
 
 
 def voe_remote_upload(direct_url, filename):
@@ -58,15 +77,13 @@ def voe_remote_upload(direct_url, filename):
             )
             sd = sr.json()
             logger.info("VoE status {}: {}".format(i, sd))
-
             s = str(sd.get("status", "")).lower()
             if s == "done" or sd.get("completed") or s == "200":
                 return "https://voe.sx/{}".format(file_code), None
             elif s in ["error", "failed", "404"]:
-                return None, "VoE upload fail: {}".format(sd)
+                return None, "VoE fail: {}".format(sd)
 
         return None, "VoE timeout"
-
     except Exception as e:
         logger.error("VoE: {}".format(e))
         return None, str(e)
@@ -77,11 +94,7 @@ app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 @app.on_message(filters.command("start"))
 async def start(client, message: Message):
-    await message.reply(
-        "👋 Hello!\n\nVideo ya file bhejo.\n"
-        "Main seedha VoE pe upload karke streaming link dunga! 🎬\n\n"
-        "2GB tak support hai!"
-    )
+    await message.reply("👋 Hello! Video ya file bhejo — VoE streaming link milega! 🎬")
 
 
 @app.on_message(filters.video | filters.document | filters.audio | filters.voice | filters.video_note)
@@ -115,66 +128,42 @@ async def handle_file(client, message: Message):
         return
 
     size_mb = round(size / 1024 / 1024, 1)
+    wait = await message.reply("File mili: {}\nSize: {}MB\n\nProcess ho raha hai...".format(filename, size_mb))
 
-    wait = await message.reply(
-        "File mili: {}\nSize: {}MB\n\nURL nikal raha hoon...".format(filename, size_mb)
-    )
+    try:
+        # Step 1: 20MB tak Bot API URL try karo
+        direct_url = get_telegram_url(file_id)
 
-    # Bot API se direct URL nikalo (20MB limit apply hogi sirf getFile pe)
-    direct_url = get_file_path_via_api(file_id)
+        if not direct_url:
+            # Step 2: Badi file — Pyrogram se download karo
+            await wait.edit("Badi file hai, download ho raha hai... ({}MB)".format(size_mb))
+            file_data = await client.download_media(message, in_memory=True)
+            file_bytes = bytes(file_data.getvalue())
 
-    if not direct_url:
-        # 20MB se badi file hai — Pyrogram se download karke upload karna hoga
-        await wait.edit(
-            "File badi hai ({}MB), Telegram se download kar raha hoon...\n"
-            "(Ye 2-5 min le sakta hai)".format(size_mb)
-        )
-        try:
-            file_bytes = await client.download_media(message, in_memory=True)
-            file_bytes = bytes(file_bytes.getvalue())
+            await wait.edit("Temporary server pe upload ho raha hai... ({}MB)".format(size_mb))
+            direct_url = upload_to_tmpfiles(file_bytes, filename)
 
-            # Gofile pe upload karo direct link ke liye
-            await wait.edit("Intermediate upload ho raha hai...")
-            r = requests.get("https://api.gofile.io/servers", timeout=10)
-            server = r.json()["data"]["servers"][0]["name"]
-            r2 = requests.post(
-                "https://{}.gofile.io/uploadFile".format(server),
-                files={"file": (filename, file_bytes)},
-                timeout=300
-            )
-            gdata = r2.json()
-            if gdata.get("status") == "ok":
-                direct_url = gdata["data"].get("directLink", "")
-                if not direct_url:
-                    await wait.edit(
-                        "Gofile link (direct nahi mila):\n{}".format(gdata["data"]["downloadPage"])
-                    )
-                    return
-            else:
-                await wait.edit("Intermediate upload fail. Dobara try karo.")
+            if not direct_url:
+                await wait.edit("Temporary upload fail. Dobara try karo.")
                 return
-        except Exception as e:
-            await wait.edit("Download error: {}".format(str(e)[:200]))
+
+        logger.info("Direct URL: {}".format(direct_url))
+
+        if not VOE_KEY:
+            await wait.edit("URL mila:\n{}\n\nVOE_KEY set nahi hai.".format(direct_url))
             return
 
-    if not VOE_KEY:
-        await wait.edit("Direct URL:\n{}\n\nVOE_KEY Railway mein set karo.".format(direct_url))
-        return
+        await wait.edit("VoE pe upload ho raha hai... ({}MB, 2-5 min)".format(size_mb))
+        voe_link, err = voe_remote_upload(direct_url, filename)
 
-    await wait.edit(
-        "VoE pe upload ho raha hai...\nSize: {}MB\n(2-5 min wait karo)".format(size_mb)
-    )
+        if voe_link:
+            await wait.edit("Done! 🎬\n\nVoE Link:\n{}\n\nFile: {} - {}MB".format(voe_link, filename, size_mb))
+        else:
+            await wait.edit("VoE issue: {}\n\nTemp link:\n{}".format(err, direct_url))
 
-    voe_link, err = voe_remote_upload(direct_url, filename)
-
-    if voe_link:
-        await wait.edit(
-            "Done! 🎬\n\nVoE Link:\n{}\n\nFile: {} - {}MB".format(voe_link, filename, size_mb)
-        )
-    else:
-        await wait.edit(
-            "VoE issue: {}\n\nTemp URL:\n{}".format(err, direct_url)
-        )
+    except Exception as e:
+        logger.error("Error: {}".format(e))
+        await wait.edit("Error: {}".format(str(e)[:300]))
 
 
 if __name__ == "__main__":

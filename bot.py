@@ -47,39 +47,7 @@ def get_telegram_url(file_id):
         return None
 
 
-def voe_upload_bytes(file_bytes, filename):
-    try:
-        r = requests.post(
-            "https://voe.sx/api/upload?key={}".format(VOE_KEY),
-            files={"file": (filename, file_bytes)},
-            timeout=600
-        )
 
-        # FIX: Empty response check
-        if not r.text.strip():
-            return None, "VoE empty response (upload)"
-
-        try:
-            data = r.json()
-        except Exception:
-            return None, "VoE invalid JSON: {}".format(r.text[:200])
-
-        logger.info("VoE direct: {}".format(data))
-
-        if data.get("status") == 200 or data.get("success"):
-            files = data.get("files") or []
-            if files:
-                fc = files[0].get("file_code", "")
-            else:
-                fc = data.get("file_code") or data.get("filecode") or ""
-            if fc:
-                return "https://voe.sx/{}".format(fc), None
-
-        return None, "VoE response: {}".format(data)
-
-    except Exception as e:
-        logger.error("VoE direct: {}".format(e))
-        return None, str(e)
 
 
 def voe_remote_upload(direct_url, filename):
@@ -142,6 +110,27 @@ def voe_remote_upload(direct_url, filename):
         logger.error("VoE remote: {}".format(e))
         return None, str(e)
 
+
+
+
+def catbox_upload(file_path, filename):
+    """Catbox pe file upload karo — public temp URL milegi VoE ke liye"""
+    try:
+        with open(file_path, "rb") as f:
+            r = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload", "userhash": ""},
+                files={"fileToUpload": (filename, f)},
+                timeout=600
+            )
+        url = r.text.strip()
+        if url.startswith("https://"):
+            logger.info("Catbox upload success: {}".format(url))
+            return url, None
+        return None, "Catbox response: {}".format(url[:200])
+    except Exception as e:
+        logger.error("Catbox upload error: {}".format(e))
+        return None, str(e)
 
 app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -283,13 +272,15 @@ async def handle_file(client, message: Message):
         direct_url = get_telegram_url(file_id)
 
         if direct_url:
+            # ✅ Bot API URL mili (<20MB) — seedha VoE remote upload
             await wait.edit(
-                "🎬 VoE pe upload ho raha hai...\n📦 {}MB{}\n\n[░░░░░░░░░░░░░░░░░░░░]\n⏳ 2-5 min...".format(
+                "🎬 VoE pe remote upload ho raha hai...\n📦 {}MB{}\n\n[░░░░░░░░░░░░░░░░░░░░]\n⏳ 2-5 min...".format(
                     size_mb, session_info
                 )
             )
             voe_link, err = voe_remote_upload(direct_url, filename)
         else:
+            # ✅ 20MB+ file — Pyrogram se download karo, catbox pe upload karo, phir VoE remote upload
             last_update = [0]
 
             async def progress(current, total):
@@ -300,28 +291,45 @@ async def handle_file(client, message: Message):
                 bar = progress_bar(current, total)
                 try:
                     await wait.edit(
-                        "📥 Download ho raha hai...{}\n\n{}\n\n⏳ Wait karo...".format(session_info, bar)
+                        "📥 Telegram se download ho raha hai...{}\n\n{}\n\n⏳ Wait karo...".format(session_info, bar)
                     )
                 except Exception:
                     pass
 
             await wait.edit(
-                "📥 Download ho raha hai...{}\n\n[░░░░░░░░░░░░░░░░░░░░] 0%\n0 MB / {} MB\n\n⏳ Wait karo...".format(
+                "📥 Telegram se download ho raha hai...{}\n\n[░░░░░░░░░░░░░░░░░░░░] 0%\n0 MB / {} MB\n\n⏳ Wait karo...".format(
                     session_info, size_mb
                 )
             )
 
-            file_data = await client.download_media(message, in_memory=True, progress=progress)
-            file_bytes = bytes(file_data.getvalue())
+            tmp_path = "/tmp/{}".format(filename)
+            await client.download_media(message, file_name=tmp_path, progress=progress)
 
             await wait.edit(
-                "✅ Download ho gaya!\n📦 {}MB{}\n\n⬆️ VoE pe upload ho raha hai...\n⏳ 2-5 min...".format(
+                "✅ Download ho gaya!\n📦 {}MB{}\n\n⬆️ Catbox pe upload ho raha hai (temp)...\n⏳ Wait karo...".format(
                     size_mb, session_info
                 )
             )
 
+            # Catbox pe upload karo — free anonymous hosting, VoE isse download kar sakta hai
             loop = asyncio.get_event_loop()
-            voe_link, err = await loop.run_in_executor(None, voe_upload_bytes, file_bytes, filename)
+            temp_url, cat_err = await loop.run_in_executor(None, catbox_upload, tmp_path, filename)
+
+            # Temp file delete karo
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+            if not temp_url:
+                voe_link, err = None, "Catbox upload fail: {}".format(cat_err)
+            else:
+                await wait.edit(
+                    "✅ Temp upload ho gaya!\n📦 {}MB{}\n\n🎬 VoE pe remote upload ho raha hai...\n⏳ 2-5 min...".format(
+                        size_mb, session_info
+                    )
+                )
+                voe_link, err = voe_remote_upload(temp_url, filename)
 
         if voe_link:
             if user_id in sessions and ep_num:

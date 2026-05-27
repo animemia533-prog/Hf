@@ -1,10 +1,9 @@
 """
-AnimeVerse Upload Bot — Pyrogram + VOE Edition
+AnimeVerse Upload Bot — Simple Edition
 Flow:
   1. /setup anime-slug S1
-  2. Saari files ek saath forward karo (kisi bhi order mein)
-  3. Bot caption se EP number + Quality auto-detect karega
-  4. /done → sab upload VoE pe
+  2. Ek ek episode ki file bhejo
+  3. /done → sab VoE pe upload
 """
 
 import re
@@ -23,7 +22,7 @@ API_ID       = int(os.environ.get("API_ID", "0"))
 API_HASH     = os.environ.get("API_HASH", "")
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 VOE_KEY      = os.environ.get("VOE_KEY", "")
-ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))  # Sirf aap use kar sako
+ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
 
 LIMIT_BYTES  = 500 * 1024 * 1024  # 500MB
 
@@ -32,7 +31,7 @@ LIMIT_BYTES  = 500 * 1024 * 1024  # 500MB
 # ══════════════════════════════════════════════════════
 
 session = {"anime_id": None, "season": None, "done_eps": 0}
-# ep_buffer[ep_num] = [ {file_id, size, quality, name}, ... ]
+# ep_buffer[ep_num] = { file_id, size, name, tg_msg }
 ep_buffer = {}
 
 
@@ -45,33 +44,26 @@ def reset_all():
 #   CAPTION PARSER
 # ══════════════════════════════════════════════════════
 
-def parse_caption(text):
+def parse_ep(text):
+    """Sirf EP number chahiye"""
     if not text:
-        return None, None
+        return None
     t = text.upper()
 
-    ep_num = None
-    ep_match = re.search(r'\bEP(?:ISODE)?\s*[-:.\s]*(\d{1,3})\b', t)
-    if ep_match:
-        ep_num = int(ep_match.group(1))
+    m = re.search(r'\bEP(?:ISODE)?\s*[-:.\s]*(\d{1,3})\b', t)
+    if m:
+        return int(m.group(1))
 
-    if not ep_num:
-        e_match = re.search(r'\bE(\d{1,3})\b', t)
-        if e_match:
-            ep_num = int(e_match.group(1))
+    m = re.search(r'\bE(\d{1,3})\b', t)
+    if m:
+        return int(m.group(1))
 
-    if not ep_num:
-        cleaned = re.sub(r'\bS\d{1,2}\b', '', t)
-        nums = re.findall(r'\b(\d{1,3})\b', cleaned)
-        if nums:
-            ep_num = int(nums[0])
+    cleaned = re.sub(r'\bS\d{1,2}\b', '', t)
+    nums = re.findall(r'\b(\d{1,3})\b', cleaned)
+    if nums:
+        return int(nums[0])
 
-    quality = None
-    q_match = re.search(r'\b(1080P|720P|480P)\b', t)
-    if q_match:
-        quality = q_match.group(1).replace("P", "p")
-
-    return ep_num, quality
+    return None
 
 
 # ══════════════════════════════════════════════════════
@@ -95,26 +87,22 @@ def get_telegram_url(file_id):
 
 
 def upload_to_voe_stream(file_id, filename):
-    """Telegram CDN se seedha stream karke VoE pe upload karo — koi local storage nahi"""
+    """20MB tak — stream karke upload"""
     try:
-        # Step 1: VoE upload server lo
         sr = requests.get(
             "https://voe.sx/api/upload/server",
             params={"key": VOE_KEY},
             timeout=30
         )
         sdata = sr.json()
-        logger.info("VoE server: {}".format(sdata))
         if sdata.get("status") != 200:
             return None, "VoE server error: {}".format(sdata)
         upload_url = sdata["result"]
 
-        # Step 2: Telegram URL nikalo
         tg_url = get_telegram_url(file_id)
         if not tg_url:
             return None, "Telegram URL nahi mila (file 20MB se badi hai?)"
 
-        # Step 3: Stream karke VoE pe upload
         with requests.get(tg_url, stream=True, timeout=300) as tg_stream:
             tg_stream.raise_for_status()
             upload_res = requests.post(
@@ -144,7 +132,7 @@ def upload_to_voe_stream(file_id, filename):
 
 
 def upload_to_voe_bytes(file_bytes, filename):
-    """Badi files ke liye bytes upload"""
+    """20MB se badi files ke liye"""
     try:
         sr = requests.get(
             "https://voe.sx/api/upload/server",
@@ -163,7 +151,6 @@ def upload_to_voe_bytes(file_bytes, filename):
             timeout=600
         )
         udata = upload_res.json()
-        logger.info("VoE bytes upload: {}".format(udata))
 
         if udata.get("status") == 200:
             result = udata.get("result", [{}])
@@ -196,90 +183,59 @@ def progress_bar(current, total):
 
 
 # ══════════════════════════════════════════════════════
-#   PROCESS EPISODE (single ep upload)
+#   PROCESS EPISODE
 # ══════════════════════════════════════════════════════
 
-async def process_ep(client, chat_id, ep_num, files):
+async def process_ep(client, chat_id, ep_num, f):
     anime_id = session["anime_id"]
     season   = session["season"]
     ep_key   = "E{}".format(str(ep_num).zfill(2))
+    fname    = f.get("name") or "{}_{}_{}. mp4".format(anime_id, season, ep_key)
+    file_id  = f["file_id"]
+    size_mb  = round(f["size"] / (1024 * 1024), 1)
 
-    # Size ke hisaab se sort — chota=480p, beech=720p, bada=1080p
-    sorted_files = sorted(files, key=lambda x: x["size"])
-    quality_map  = {0: "480p", 1: "720p", 2: "1080p"}
-    for i, f in enumerate(sorted_files):
-        if not f.get("quality") or f["quality"] == "pending":
-            f["quality"] = quality_map.get(i, "part{}".format(i + 1))
-
-    await client.send_message(
+    status_msg = await client.send_message(
         chat_id,
-        "⚙️ **{} — VoE Upload Shuru...**\n{} files upload hongi ⏳".format(ep_key, len(sorted_files))
+        "📤 **{}** ({}MB) VoE pe upload ho raha hai...".format(ep_key, size_mb)
     )
 
-    results = {}
-    for f in sorted_files:
-        quality  = f["quality"]
-        size_mb  = round(f["size"] / (1024 * 1024), 1)
-        fname    = f.get("name") or "{}_{}_{}_{}.mp4".format(anime_id, season, ep_key, quality)
-        file_id  = f["file_id"]
+    if f["size"] <= 20 * 1024 * 1024:
+        loop = asyncio.get_event_loop()
+        voe_link, err = await loop.run_in_executor(None, upload_to_voe_stream, file_id, fname)
+    else:
+        last_update = [0]
 
-        status_msg = await client.send_message(
-            chat_id,
-            "📤 `{}` ({}MB) upload ho raha hai...".format(quality, size_mb)
-        )
+        async def progress(current, total):
+            now = time.time()
+            if now - last_update[0] < 3:
+                return
+            last_update[0] = now
+            bar = progress_bar(current, total)
+            try:
+                await status_msg.edit("📥 **{}** download ho raha hai...\n\n{}".format(ep_key, bar))
+            except Exception:
+                pass
 
-        # Chhoti file — stream upload, badi file — download then upload
-        if f["size"] <= 20 * 1024 * 1024:
+        tg_msg = f.get("tg_msg")
+        if tg_msg:
+            file_data = await client.download_media(tg_msg, in_memory=True, progress=progress)
+            file_bytes = bytes(file_data.getvalue())
+            await status_msg.edit("✅ Download done! VoE pe upload ho raha hai... **{}**".format(ep_key))
             loop = asyncio.get_event_loop()
-            voe_link, err = await loop.run_in_executor(None, upload_to_voe_stream, file_id, fname)
+            voe_link, err = await loop.run_in_executor(None, upload_to_voe_bytes, file_bytes, fname)
         else:
-            # Pyrogram se download karo
-            last_update = [0]
-
-            async def progress(current, total):
-                now = time.time()
-                if now - last_update[0] < 3:
-                    return
-                last_update[0] = now
-                bar = progress_bar(current, total)
-                try:
-                    await status_msg.edit("📥 Download: `{}`\n\n{}\n⏳...".format(quality, bar))
-                except Exception:
-                    pass
-
-            # Find message in chat to download
-            # We stored msg_id in buffer
-            tg_msg = f.get("tg_msg")
-            if tg_msg:
-                file_data = await client.download_media(tg_msg, in_memory=True, progress=progress)
-                file_bytes = bytes(file_data.getvalue())
-                await status_msg.edit("✅ Download done! VoE pe upload ho raha hai... `{}`".format(quality))
-                loop = asyncio.get_event_loop()
-                voe_link, err = await loop.run_in_executor(None, upload_to_voe_bytes, file_bytes, fname)
-            else:
-                voe_link, err = None, "Message reference nahi mila"
-
-        if voe_link:
-            results[quality] = voe_link
-            await status_msg.edit("✅ `{}` done!\n`{}`".format(quality, voe_link))
-        else:
-            await status_msg.edit("❌ `{}` fail: {}".format(quality, err))
-
-        time.sleep(1)
+            voe_link, err = None, "Message reference nahi mila"
 
     session["done_eps"] += 1
 
-    if results:
-        q_lines = "\n".join(["• {}: ✅ `{}`".format(q, l) for q, l in results.items()])
-        await client.send_message(
-            chat_id,
-            "🎉 **{} Complete!**\n{}\n\nAnime: `{}` | `{}`".format(ep_key, q_lines, anime_id, season)
+    if voe_link:
+        await status_msg.edit(
+            "✅ **{} Done!**\n"
+            "🔗 `{}`\n"
+            "📺 `{}` | `{}`".format(ep_key, voe_link, anime_id, season)
         )
     else:
-        await client.send_message(
-            chat_id,
-            "❌ **{} Fail!** VoE key check karo.".format(ep_key)
-        )
+        await status_msg.edit("❌ **{} Fail!** Error: {}".format(ep_key, err))
 
 
 # ══════════════════════════════════════════════════════
@@ -300,10 +256,10 @@ async def cmd_start(client, message: Message):
     if not is_allowed(message):
         return
     await message.reply(
-        "🎌 **AnimeVerse Upload Bot — VoE Edition**\n"
+        "🎌 **AnimeVerse Upload Bot**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "**Step 1:** `/setup anime-slug S1`\n"
-        "**Step 2:** Saari files ek saath forward karo\n"
+        "**Step 2:** Har episode ki ek file bhejo\n"
         "**Step 3:** `/done` jab sab bhej do\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📋 `/status` — buffer dekho\n"
@@ -332,8 +288,8 @@ async def cmd_setup(client, message: Message):
         "✅ **Setup Done!**\n"
         "📺 Anime: `{}`\n"
         "🎬 Season: `{}`\n\n"
-        "Ab saari files forward karo!\n"
-        "Bot caption se EP + Quality khud detect karega 🤖\n"
+        "Ab har episode ki ek file bhejo!\n"
+        "Bot caption se EP number khud detect karega 🤖\n"
         "/done jab sab bhej do.".format(slug, season_raw)
     )
 
@@ -345,17 +301,17 @@ async def cmd_done(client, message: Message):
     if not ep_buffer:
         await message.reply("✅ Koi pending episode nahi!")
         return
-    pending = list(ep_buffer.keys())
-    await message.reply("⚙️ **{} pending episodes process ho rahe hain...**".format(len(pending)))
-    for ep_num in sorted(pending):
-        files = ep_buffer.pop(ep_num)
-        await process_ep(client, message.chat.id, ep_num, files)
+    pending = sorted(ep_buffer.keys())
+    await message.reply("⚙️ **{} episodes upload ho rahe hain...**".format(len(pending)))
+    for ep_num in pending:
+        f = ep_buffer.pop(ep_num)
+        await process_ep(client, message.chat.id, ep_num, f)
     total = session["done_eps"]
     await message.reply(
         "🏁 **Sab Complete!**\n"
         "✅ **{} episodes** VoE pe upload!\n"
         "📺 `{}` | `{}`\n\n"
-        "Naya season ke liye `/setup` karo.".format(total, session["anime_id"], session["season"])
+        "Naye season ke liye `/setup` karo.".format(total, session["anime_id"], session["season"])
     )
 
 
@@ -373,9 +329,9 @@ async def cmd_status(client, message: Message):
         "⏳ Buffer: `{} episodes`\n".format(len(ep_buffer))
     ]
     for ep_num in sorted(ep_buffer.keys()):
-        files = ep_buffer[ep_num]
         ep_key = "E{}".format(str(ep_num).zfill(2))
-        lines.append("  {}: {} files".format(ep_key, len(files)))
+        size_mb = round(ep_buffer[ep_num]["size"] / (1024 * 1024), 1)
+        lines.append("  {}: {}MB ready".format(ep_key, size_mb))
     await message.reply("\n".join(lines))
 
 
@@ -401,53 +357,49 @@ async def handle_file(client, message: Message):
     file_name = getattr(file_obj, "file_name", None) or "video.mp4"
     caption   = message.caption or ""
 
-    # Size check
     if file_size > LIMIT_BYTES:
-        await message.reply("❌ File {}MB ki hai. Limit 500MB hai.".format(round(file_size / 1024 / 1024, 1)))
+        await message.reply("❌ File {}MB. Limit 500MB hai.".format(round(file_size / 1024 / 1024, 1)))
         return
 
-    # Caption ya filename se EP detect karo
-    ep_num, quality = parse_caption(caption)
-    if not ep_num:
-        ep_num, quality = parse_caption(file_name)
+    # EP detect karo — caption pehle, phir filename
+    ep_num = parse_ep(caption) or parse_ep(file_name)
 
     if not ep_num:
         await message.reply(
             "⚠️ **Episode detect nahi hua!**\n"
             "Caption: `{}`\n\n"
-            "Caption mein `Episode - 04` ya `EP04` ya `E04` hona chahiye.".format(caption[:100])
+            "Caption mein `EP04` ya `Episode 04` ya `E04` hona chahiye.".format(caption[:100])
         )
         return
 
-    ep_key = "E{}".format(str(ep_num).zfill(2))
+    ep_key  = "E{}".format(str(ep_num).zfill(2))
     size_mb = round(file_size / (1024 * 1024), 1)
 
-    if ep_num not in ep_buffer:
-        ep_buffer[ep_num] = []
-
-    # Duplicate check
-    existing_sizes = [f["size"] for f in ep_buffer[ep_num]]
-    if file_size in existing_sizes:
-        await message.reply("⚠️ **{}** — same file dobara aai! Skip.".format(ep_key))
-        return
-
-    ep_buffer[ep_num].append({
-        "file_id": file_id,
-        "size":    file_size,
-        "quality": quality or "pending",
-        "name":    file_name,
-        "tg_msg":  message,  # Reference for large file download
-    })
-
-    count = len(ep_buffer[ep_num])
-    await message.reply(
-        "📥 `{}MB` received\n"
-        "📦 **{}** — {} file(s) buffer mein\n"
-        "🎬 `{}` | `{}`\n\n"
-        "Aur files bhejo ya `/done` karo upload ke liye!".format(
-            size_mb, ep_key, count, session["anime_id"], session["season"]
+    # Agar same EP dobara aayi — overwrite karo (updated file)
+    if ep_num in ep_buffer:
+        ep_buffer[ep_num] = {
+            "file_id": file_id,
+            "size":    file_size,
+            "name":    file_name,
+            "tg_msg":  message,
+        }
+        await message.reply(
+            "🔄 **{}** update hua! ({}MB)\n"
+            "`{}` | `{}`\n"
+            "/done se upload karo.".format(ep_key, size_mb, session["anime_id"], session["season"])
         )
-    )
+    else:
+        ep_buffer[ep_num] = {
+            "file_id": file_id,
+            "size":    file_size,
+            "name":    file_name,
+            "tg_msg":  message,
+        }
+        await message.reply(
+            "📥 **{}** buffer mein! ({}MB)\n"
+            "`{}` | `{}`\n"
+            "Aur episodes bhejo ya /done karo.".format(ep_key, size_mb, session["anime_id"], session["season"])
+        )
 
 
 if __name__ == "__main__":

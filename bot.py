@@ -2,6 +2,7 @@ import os
 import time
 import requests
 import logging
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -12,6 +13,11 @@ API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 VOE_KEY = os.environ.get("VOE_KEY", "")
+
+# Active sessions store karo — {user_id: {slug, season, ep_count}}
+sessions = {}
+
+LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
 
 
 def progress_bar(current, total):
@@ -41,22 +47,27 @@ def get_telegram_url(file_id):
         return None
 
 
-def upload_to_tmpfiles(file_bytes, filename):
+def voe_upload_bytes(file_bytes, filename):
     try:
         r = requests.post(
-            "https://tmpfiles.org/api/v1/upload",
+            "https://voe.sx/api/upload?key={}".format(VOE_KEY),
             files={"file": (filename, file_bytes)},
-            timeout=300
+            timeout=600
         )
         data = r.json()
-        logger.info("tmpfiles: {}".format(data))
-        if data.get("status") == "success":
-            page_url = data["data"]["url"]
-            direct_url = page_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-            return direct_url
+        logger.info("VoE direct: {}".format(data))
+        if data.get("status") == 200 or data.get("success"):
+            files = data.get("files") or []
+            if files:
+                fc = files[0].get("file_code", "")
+            else:
+                fc = data.get("file_code") or data.get("filecode") or ""
+            if fc:
+                return "https://voe.sx/{}".format(fc), None
+        return None, "VoE response: {}".format(data)
     except Exception as e:
-        logger.error("tmpfiles: {}".format(e))
-    return None
+        logger.error("VoE direct: {}".format(e))
+        return None, str(e)
 
 
 def voe_remote_upload(direct_url, filename):
@@ -67,15 +78,12 @@ def voe_remote_upload(direct_url, filename):
             timeout=30
         )
         data = r.json()
-        logger.info("VoE start: {}".format(data))
-
+        logger.info("VoE remote start: {}".format(data))
         if not data.get("status"):
             return None, "VoE start fail: {}".format(data)
-
         file_code = data.get("file_code") or data.get("filecode")
         if not file_code:
             return None, "file_code nahi mila"
-
         for i in range(120):
             time.sleep(5)
             sr = requests.get(
@@ -90,10 +98,9 @@ def voe_remote_upload(direct_url, filename):
                 return "https://voe.sx/{}".format(file_code), None
             elif s in ["error", "failed", "404"]:
                 return None, "VoE fail: {}".format(sd)
-
         return None, "VoE timeout"
     except Exception as e:
-        logger.error("VoE: {}".format(e))
+        logger.error("VoE remote: {}".format(e))
         return None, str(e)
 
 
@@ -102,11 +109,107 @@ app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 @app.on_message(filters.command("start"))
 async def start(client, message: Message):
-    await message.reply("👋 Hello! Video ya file bhejo — VoE streaming link milega! 🎬")
+    await message.reply(
+        "👋 Hello! Main VoE Upload Bot hoon!\n\n"
+        "📋 Commands:\n\n"
+        "▶️ /setup <slug> S<season>\n"
+        "   Example: /setup one-piece S1\n"
+        "   Phir episodes forward karo!\n\n"
+        "📊 /status — current session dekho\n"
+        "🔄 /reset — session clear karo\n\n"
+        "500MB tak episodes support hain! 🎬"
+    )
 
 
-@app.on_message(filters.video | filters.document | filters.audio | filters.voice | filters.video_note)
+@app.on_message(filters.command("setup"))
+async def setup(client, message: Message):
+    user_id = message.from_user.id
+    parts = message.text.strip().split()
+
+    if len(parts) < 3:
+        await message.reply(
+            "❌ Format galat hai!\n\n"
+            "✅ Sahi format:\n"
+            "/setup <anime-slug> S<season>\n\n"
+            "Example:\n"
+            "/setup one-piece S1\n"
+            "/setup dragon-ball-z S3"
+        )
+        return
+
+    slug = parts[1].lower()
+    season_raw = parts[2].upper()
+
+    if not season_raw.startswith("S") or not season_raw[1:].isdigit():
+        await message.reply("❌ Season format galat! Use karo: S1, S2, S3...")
+        return
+
+    season = int(season_raw[1:])
+    sessions[user_id] = {
+        "slug": slug,
+        "season": season,
+        "ep_count": 0,
+        "links": []
+    }
+
+    await message.reply(
+        "✅ Setup complete!\n\n"
+        "🎬 Anime: {}\n"
+        "📺 Season: {}\n\n"
+        "Ab episodes forward karo — main automatically VoE pe upload karta rahunga!\n"
+        "📊 /status se progress dekho\n"
+        "🔄 /reset se band karo".format(slug, season)
+    )
+
+
+@app.on_message(filters.command("status"))
+async def status(client, message: Message):
+    user_id = message.from_user.id
+    if user_id not in sessions:
+        await message.reply("⚠️ Koi active session nahi.\n/setup se shuru karo.")
+        return
+
+    s = sessions[user_id]
+    links_text = ""
+    if s["links"]:
+        links_text = "\n\n📋 Uploaded links:\n"
+        for item in s["links"]:
+            links_text += "EP{}: {}\n".format(item["ep"], item["link"])
+
+    await message.reply(
+        "📊 Current Session:\n\n"
+        "🎬 Anime: {}\n"
+        "📺 Season: {}\n"
+        "✅ Uploaded: {} episodes{}".format(s["slug"], s["season"], s["ep_count"], links_text)
+    )
+
+
+@app.on_message(filters.command("reset"))
+async def reset(client, message: Message):
+    user_id = message.from_user.id
+    if user_id in sessions:
+        s = sessions[user_id]
+        # Final summary do
+        if s["links"]:
+            links_text = "📋 All Links:\n"
+            for item in s["links"]:
+                links_text += "EP{} S{}: {}\n".format(item["ep"], s["season"], item["link"])
+            await message.reply(
+                "🔄 Session reset!\n\n"
+                "🎬 Anime: {}\n"
+                "✅ Total: {} episodes\n\n{}".format(s["slug"], s["ep_count"], links_text)
+            )
+        else:
+            await message.reply("🔄 Session reset!")
+        del sessions[user_id]
+    else:
+        await message.reply("⚠️ Koi active session nahi tha.")
+
+
+@app.on_message(filters.video | filters.document)
 async def handle_file(client, message: Message):
+    user_id = message.from_user.id
+
     if message.video:
         media = message.video
         filename = media.file_name or "video_{}.mp4".format(media.file_unique_id)
@@ -117,34 +220,41 @@ async def handle_file(client, message: Message):
         filename = media.file_name or "doc_{}".format(media.file_unique_id)
         size = media.file_size or 0
         file_id = media.file_id
-    elif message.audio:
-        media = message.audio
-        filename = media.file_name or "audio_{}.mp3".format(media.file_unique_id)
-        size = media.file_size or 0
-        file_id = media.file_id
-    elif message.voice:
-        media = message.voice
-        filename = "voice_{}.ogg".format(media.file_unique_id)
-        size = media.file_size or 0
-        file_id = media.file_id
-    elif message.video_note:
-        media = message.video_note
-        filename = "vnote_{}.mp4".format(media.file_unique_id)
-        size = media.file_size or 0
-        file_id = media.file_id
     else:
         return
 
     size_mb = round(size / 1024 / 1024, 1)
+
+    # Size check
+    if size > LIMIT_BYTES:
+        await message.reply("❌ File {}MB ki hai. Limit 500MB hai.".format(size_mb))
+        return
+
+    # Session info
+    session_info = ""
+    if user_id in sessions:
+        s = sessions[user_id]
+        s["ep_count"] += 1
+        ep_num = s["ep_count"]
+        session_info = "\n🎬 {}\n📺 S{} EP{}".format(s["slug"], s["season"], ep_num)
+    else:
+        ep_num = None
+
     wait = await message.reply(
-        "📥 File mili!\n📁 {}\n📦 {}MB\n\nShuru ho raha hai...".format(filename, size_mb)
+        "📥 File mili!\n📁 {}\n📦 {}MB{}\n\nShuru ho raha hai...".format(filename, size_mb, session_info)
     )
 
     try:
         direct_url = get_telegram_url(file_id)
 
-        if not direct_url:
-            # Badi file — progress ke saath download karo
+        if direct_url:
+            await wait.edit(
+                "🎬 VoE pe upload ho raha hai...\n📦 {}MB{}\n\n[░░░░░░░░░░░░░░░░░░░░]\n⏳ 2-5 min...".format(
+                    size_mb, session_info
+                )
+            )
+            voe_link, err = voe_remote_upload(direct_url, filename)
+        else:
             last_update = [0]
 
             async def progress(current, total):
@@ -155,52 +265,48 @@ async def handle_file(client, message: Message):
                 bar = progress_bar(current, total)
                 try:
                     await wait.edit(
-                        "📥 Telegram se download ho raha hai...\n\n{}\n\n⏳ Thoda wait karo...".format(bar)
+                        "📥 Download ho raha hai...{}\n\n{}\n\n⏳ Wait karo...".format(session_info, bar)
                     )
                 except Exception:
                     pass
 
             await wait.edit(
-                "📥 Telegram se download ho raha hai...\n\n[░░░░░░░░░░░░░░░░░░░░] 0%\n0 MB / {} MB\n\n⏳ Thoda wait karo...".format(size_mb)
+                "📥 Download ho raha hai...{}\n\n[░░░░░░░░░░░░░░░░░░░░] 0%\n0 MB / {} MB\n\n⏳ Wait karo...".format(
+                    session_info, size_mb
+                )
             )
 
             file_data = await client.download_media(message, in_memory=True, progress=progress)
             file_bytes = bytes(file_data.getvalue())
 
             await wait.edit(
-                "✅ Download complete!\n📦 {}MB\n\n⬆️ Temporary server pe upload ho raha hai...".format(size_mb)
+                "✅ Download ho gaya!\n📦 {}MB{}\n\n⬆️ VoE pe upload ho raha hai...\n⏳ 2-5 min...".format(
+                    size_mb, session_info
+                )
             )
-            direct_url = upload_to_tmpfiles(file_bytes, filename)
 
-            if not direct_url:
-                await wait.edit("❌ Temporary upload fail. Dobara try karo.")
-                return
-
-        logger.info("Direct URL: {}".format(direct_url))
-
-        if not VOE_KEY:
-            await wait.edit("🔗 URL:\n{}\n\n⚠️ VOE_KEY set nahi hai.".format(direct_url))
-            return
-
-        await wait.edit(
-            "🎬 VoE pe upload ho raha hai...\n📦 {}MB\n\n[░░░░░░░░░░░░░░░░░░░░]\n⏳ 2-5 min lag sakta hai...".format(size_mb)
-        )
-
-        voe_link, err = voe_remote_upload(direct_url, filename)
+            loop = asyncio.get_event_loop()
+            voe_link, err = await loop.run_in_executor(None, voe_upload_bytes, file_bytes, filename)
 
         if voe_link:
+            # Session mein save karo
+            if user_id in sessions and ep_num:
+                sessions[user_id]["links"].append({"ep": ep_num, "link": voe_link})
+
             await wait.edit(
-                "✅ Done!\n\n🎬 VoE Streaming Link:\n{}\n\n📁 File: {}\n📦 Size: {}MB".format(
-                    voe_link, filename, size_mb
+                "✅ Done!\n\n🎬 VoE Link:\n{}\n\n📁 {}\n📦 {}MB{}".format(
+                    voe_link, filename, size_mb, session_info
                 )
             )
         else:
-            await wait.edit(
-                "⚠️ VoE issue: {}\n\n🔗 Temp link:\n{}".format(err, direct_url)
-            )
+            if user_id in sessions and ep_num:
+                sessions[user_id]["ep_count"] -= 1
+            await wait.edit("❌ VoE upload fail: {}".format(err))
 
     except Exception as e:
         logger.error("Error: {}".format(e))
+        if user_id in sessions and ep_num:
+            sessions[user_id]["ep_count"] -= 1
         await wait.edit("❌ Error: {}".format(str(e)[:300]))
 
 

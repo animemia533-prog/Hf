@@ -12,6 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
+from pyrogram.storage import MemoryStorage
 import firebase_admin
 from firebase_admin import credentials, db as firebase_db
 
@@ -330,7 +331,8 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=16
+    workers=16,
+    storage=MemoryStorage()
 )
 
 

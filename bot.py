@@ -1,78 +1,77 @@
 """
-AnimeVerse Upload Bot — Auto Parallel Upload + Firebase
-Flow:
-  1. /setup anime-slug S1
-  2. Files bhejo — har file receive hote hi upload shuru
-  3. Sab parallel upload hoga, VoE link Firebase mein save hoga
+AnimeVerse Upload Bot — Pyrogram + VOE + Firebase Edition
 """
 
 import re
 import os
+import json
 import time
 import asyncio
 import requests
 import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import firebase_admin
-from firebase_admin import credentials, db as firebase_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_ID       = int(os.environ.get("API_ID", "0"))
-API_HASH     = os.environ.get("API_HASH", "")
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
-VOE_KEY      = os.environ.get("VOE_KEY", "")
-ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
-FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "")
+API_ID        = int(os.environ.get("API_ID", "0"))
+API_HASH      = os.environ.get("API_HASH", "")
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
+VOE_KEY       = os.environ.get("VOE_KEY", "")
+ALLOWED_USER  = int(os.environ.get("ALLOWED_USER", "0"))
+FIREBASE_URL  = os.environ.get("FIREBASE_URL", "")   # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+FIREBASE_CRED = os.environ.get("FIREBASE_CRED", "")  # key.json ka content (JSON string)
+
+LIMIT_BYTES   = 500 * 1024 * 1024  # 500MB
 
 # ══════════════════════════════════════════════════════
-#   FIREBASE INIT — Repo mein rakhi firebase_credentials.json se
+#   FIREBASE INIT
 # ══════════════════════════════════════════════════════
 
-CRED_FILE = os.path.join(os.path.dirname(__file__), "firebase_credentials.json")
+firebase_db = None
 
-firebase_ok = False
-
-try:
-    if not os.path.exists(CRED_FILE):
-        raise FileNotFoundError("firebase_credentials.json nahi mili! Repo mein rakho.")
-    if not FIREBASE_DB_URL:
-        raise ValueError("FIREBASE_DB_URL environment variable set nahi hai!")
-
-    cred = credentials.Certificate(CRED_FILE)
-    firebase_admin.initialize_app(cred, {
-        "databaseURL": FIREBASE_DB_URL
-    })
-    firebase_ok = True
-    logger.info("✅ Firebase connected! DB: {}".format(FIREBASE_DB_URL))
-
-except FileNotFoundError as e:
-    logger.error("❌ {}".format(e))
-except ValueError as e:
-    logger.error("❌ {}".format(e))
-except Exception as e:
-    logger.error("❌ Firebase init error: {}".format(e))
-
-LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
-
-
-def save_to_firebase(slug, season, ep_key, voe_link):
-    if not firebase_ok:
-        return False, "Firebase initialize nahi hua — firebase_credentials.json check karo"
+def init_firebase():
+    global firebase_db
     try:
-        ref = firebase_db.reference("Animes/{}/{}/{}".format(slug, season, ep_key))
-        ref.set({
+        import firebase_admin
+        from firebase_admin import credentials, db
+
+        if not FIREBASE_URL or not FIREBASE_CRED:
+            logger.warning("Firebase config nahi mila — skip")
+            return
+
+        cred_dict = json.loads(FIREBASE_CRED)
+        cred = credentials.Certificate(cred_dict)
+
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})
+
+        firebase_db = db
+        logger.info("Firebase connected!")
+    except Exception as e:
+        logger.error("Firebase init error: {}".format(e))
+
+
+def save_to_firebase(anime_id, season, ep_num, voe_link):
+    """Format: Animes/anime-slug/S1/E03 → {link, server, time}"""
+    if not firebase_db:
+        logger.warning("Firebase nahi mila, skip")
+        return False
+    try:
+        from firebase_admin import db
+        ep_key = "E{}".format(str(ep_num).zfill(2))
+        path   = "Animes/{}/{}/{}".format(anime_id, season, ep_key)
+        db.reference(path).set({
             "link":   voe_link,
-            "server": "Player4u",
+            "server": "Player4K",
             "time":   int(time.time())
         })
-        logger.info("✅ Firebase saved: {}/{}/{}".format(slug, season, ep_key))
-        return True, None
+        logger.info("Firebase saved: {}".format(path))
+        return True
     except Exception as e:
-        logger.error("❌ Firebase error: {}".format(e))
-        return False, str(e)
+        logger.error("Firebase save error: {}".format(e))
+        return False
 
 
 # ══════════════════════════════════════════════════════
@@ -80,81 +79,50 @@ def save_to_firebase(slug, season, ep_key, voe_link):
 # ══════════════════════════════════════════════════════
 
 session   = {"anime_id": None, "season": None, "done_eps": 0}
-uploading = set()
+ep_buffer = {}
 
 
 def reset_all():
     session.update({"anime_id": None, "season": None, "done_eps": 0})
-    uploading.clear()
+    ep_buffer.clear()
 
 
 # ══════════════════════════════════════════════════════
 #   CAPTION PARSER
 # ══════════════════════════════════════════════════════
 
-def parse_ep(text):
+def parse_caption(text):
     if not text:
-        return None
+        return None, None
     t = text.upper()
 
-    m = re.search(r'\bEP(?:ISODE)?\s*[-:.\s]*(\d{1,3})\b', t)
-    if m:
-        return int(m.group(1))
+    ep_num = None
+    ep_match = re.search(r'\bEP(?:ISODE)?\s*[-:.\s]*(\d{1,3})\b', t)
+    if ep_match:
+        ep_num = int(ep_match.group(1))
 
-    m = re.search(r'\bE(\d{1,3})\b', t)
-    if m:
-        return int(m.group(1))
+    if not ep_num:
+        e_match = re.search(r'\bE(\d{1,3})\b', t)
+        if e_match:
+            ep_num = int(e_match.group(1))
 
-    cleaned = re.sub(r'\bS\d{1,2}\b', '', t)
-    nums = re.findall(r'\b(\d{1,3})\b', cleaned)
-    if nums:
-        return int(nums[0])
+    if not ep_num:
+        cleaned = re.sub(r'\bS\d{1,2}\b', '', t)
+        nums = re.findall(r'\b(\d{1,3})\b', cleaned)
+        if nums:
+            ep_num = int(nums[0])
 
-    return None
+    quality = None
+    q_match = re.search(r'\b(1080P|720P|480P)\b', t)
+    if q_match:
+        quality = q_match.group(1).replace("P", "p")
 
-
-# ══════════════════════════════════════════════════════
-#   VOE LINK EXTRACTOR
-# ══════════════════════════════════════════════════════
-
-def extract_voe_link(udata):
-    fc = None
-
-    # Format 1 — naya VoE format
-    if udata.get("success") and udata.get("file"):
-        f = udata["file"]
-        fc = f.get("file_code") or f.get("filecode") or f.get("code", "")
-
-    # Format 2 — purana VoE format
-    elif udata.get("status") == 200:
-        result = udata.get("result", [{}])
-        if isinstance(result, list) and result:
-            fc = (
-                result[0].get("file_code") or
-                result[0].get("filecode") or
-                result[0].get("code", "")
-            )
-
-    if fc:
-        return "https://voe.sx/e/{}".format(fc)
-    return None
+    return ep_num, quality
 
 
 # ══════════════════════════════════════════════════════
 #   VOE UPLOAD
 # ══════════════════════════════════════════════════════
-
-def get_voe_upload_url():
-    sr = requests.get(
-        "https://voe.sx/api/upload/server",
-        params={"key": VOE_KEY},
-        timeout=30
-    )
-    sdata = sr.json()
-    if sdata.get("status") != 200:
-        return None, "VoE server error: {}".format(sdata)
-    return sdata["result"], None
-
 
 def get_telegram_url(file_id):
     try:
@@ -165,26 +133,48 @@ def get_telegram_url(file_id):
         )
         data = r.json()
         if data.get("ok"):
-            return "https://api.telegram.org/file/bot{}/{}".format(
-                BOT_TOKEN, data["result"]["file_path"]
-            )
+            return "https://api.telegram.org/file/bot{}/{}".format(BOT_TOKEN, data["result"]["file_path"])
         return None
     except Exception as e:
         logger.error("getFile: {}".format(e))
         return None
 
 
-def upload_to_voe_stream(file_id, filename):
-    """20MB tak — Telegram CDN se stream karke VoE pe upload"""
+def get_voe_server():
     try:
-        upload_url, err = get_voe_upload_url()
-        if err:
-            return None, err
+        sr = requests.get(
+            "https://voe.sx/api/upload/server",
+            params={"key": VOE_KEY},
+            timeout=30
+        )
+        sdata = sr.json()
+        if sdata.get("status") == 200:
+            return sdata["result"], None
+        return None, "VoE server error: {}".format(sdata)
+    except Exception as e:
+        return None, str(e)
 
-        tg_url = get_telegram_url(file_id)
-        if not tg_url:
-            return None, "Telegram URL nahi mila (file 20MB se badi hai?)"
 
+def parse_voe_response(udata):
+    if udata.get("status") == 200:
+        result = udata.get("result", [{}])
+        if isinstance(result, list) and result:
+            fc = result[0].get("code") or result[0].get("filecode") or result[0].get("file_code", "")
+        else:
+            fc = ""
+        if fc:
+            return "https://voe.sx/e/{}".format(fc), None
+    return None, "VoE response: {}".format(udata)
+
+
+def upload_to_voe_stream(file_id, filename):
+    upload_url, err = get_voe_server()
+    if not upload_url:
+        return None, err
+    tg_url = get_telegram_url(file_id)
+    if not tg_url:
+        return None, "Telegram URL nahi mila"
+    try:
         with requests.get(tg_url, stream=True, timeout=300) as tg_stream:
             tg_stream.raise_for_status()
             upload_res = requests.post(
@@ -193,44 +183,28 @@ def upload_to_voe_stream(file_id, filename):
                 files={"file": (filename, tg_stream.raw, "video/mp4")},
                 timeout=600
             )
-
         udata = upload_res.json()
-        logger.info("VoE stream response: {}".format(udata))
-
-        voe_link = extract_voe_link(udata)
-        if voe_link:
-            return voe_link, None
-        return None, "VoE response: {}".format(udata)
-
+        logger.info("VoE stream: {}".format(udata))
+        return parse_voe_response(udata)
     except Exception as e:
-        logger.error("VoE stream: {}".format(e))
         return None, str(e)
 
 
 def upload_to_voe_bytes(file_bytes, filename):
-    """20MB se badi files ke liye — bytes upload"""
+    upload_url, err = get_voe_server()
+    if not upload_url:
+        return None, err
     try:
-        upload_url, err = get_voe_upload_url()
-        if err:
-            return None, err
-
         upload_res = requests.post(
             upload_url,
             params={"key": VOE_KEY},
             files={"file": (filename, file_bytes, "video/mp4")},
             timeout=600
         )
-
         udata = upload_res.json()
-        logger.info("VoE bytes response: {}".format(udata))
-
-        voe_link = extract_voe_link(udata)
-        if voe_link:
-            return voe_link, None
-        return None, "VoE response: {}".format(udata)
-
+        logger.info("VoE bytes: {}".format(udata))
+        return parse_voe_response(udata)
     except Exception as e:
-        logger.error("VoE bytes: {}".format(e))
         return None, str(e)
 
 
@@ -241,41 +215,49 @@ def upload_to_voe_bytes(file_bytes, filename):
 def progress_bar(current, total):
     if total == 0:
         return ""
-    filled   = int(20 * current / total)
-    bar      = "█" * filled + "░" * (20 - filled)
-    percent  = int(100 * current / total)
-    done_mb  = round(current / 1024 / 1024, 1)
+    filled = int(20 * current / total)
+    bar = "█" * filled + "░" * (20 - filled)
+    percent = int(100 * current / total)
+    done_mb = round(current / 1024 / 1024, 1)
     total_mb = round(total / 1024 / 1024, 1)
     return "[{}] {}%\n{} MB / {} MB".format(bar, percent, done_mb, total_mb)
 
 
 # ══════════════════════════════════════════════════════
-#   UPLOAD TASK
+#   PROCESS SINGLE EPISODE
 # ══════════════════════════════════════════════════════
 
-async def upload_task(client, chat_id, ep_num, f):
+async def process_ep(client, chat_id, ep_num, files):
     anime_id = session["anime_id"]
     season   = session["season"]
     ep_key   = "E{}".format(str(ep_num).zfill(2))
-    fname    = f.get("name") or "{}_{}_{}.mp4".format(anime_id, season, ep_key)
-    file_id  = f["file_id"]
-    size_mb  = round(f["size"] / (1024 * 1024), 1)
 
-    status_msg = await client.send_message(
+    sorted_files = sorted(files, key=lambda x: x["size"])
+
+    await client.send_message(
         chat_id,
-        "📤 **{}** ({}MB) upload shuru...".format(ep_key, size_mb)
+        "⚙️ **{} — VoE Upload Shuru...**\n{} file(s) ⏳".format(ep_key, len(sorted_files))
     )
 
-    try:
+    all_success = []
+
+    for idx, f in enumerate(sorted_files):
+        quality  = f.get("quality") or "480p"
+        size_mb  = round(f["size"] / (1024 * 1024), 1)
+        fname    = "{}_{}_{}_{}.mp4".format(anime_id, season, ep_key, quality)
+        file_id  = f["file_id"]
+
+        status_msg = await client.send_message(
+            chat_id,
+            "📤 `{}` ({}MB) upload ho raha hai...".format(quality, size_mb)
+        )
+
         if f["size"] <= 20 * 1024 * 1024:
-            # Chhoti file — stream upload
             loop = asyncio.get_event_loop()
-            voe_link, err = await loop.run_in_executor(
-                None, upload_to_voe_stream, file_id, fname
-            )
+            voe_link, err = await loop.run_in_executor(None, upload_to_voe_stream, file_id, fname)
         else:
-            # Badi file — download then upload
             last_update = [0]
+            tg_msg = f.get("tg_msg")
 
             async def progress(current, total):
                 now = time.time()
@@ -284,54 +266,48 @@ async def upload_task(client, chat_id, ep_num, f):
                 last_update[0] = now
                 bar = progress_bar(current, total)
                 try:
-                    await status_msg.edit(
-                        "📥 **{}** download ho raha hai...\n\n{}".format(ep_key, bar)
-                    )
+                    await status_msg.edit("📥 Download: `{}`\n\n{}".format(quality, bar))
                 except Exception:
                     pass
 
-            tg_msg = f.get("tg_msg")
             if tg_msg:
-                file_data  = await client.download_media(
-                    tg_msg, in_memory=True, progress=progress
-                )
+                file_data = await client.download_media(tg_msg, in_memory=True, progress=progress)
                 file_bytes = bytes(file_data.getvalue())
-                await status_msg.edit(
-                    "⬆️ **{}** VoE pe ja raha hai...".format(ep_key)
-                )
+                await status_msg.edit("✅ Download done!\n⬆️ VoE pe upload ho raha hai `{}`...".format(quality))
                 loop = asyncio.get_event_loop()
-                voe_link, err = await loop.run_in_executor(
-                    None, upload_to_voe_bytes, file_bytes, fname
-                )
+                voe_link, err = await loop.run_in_executor(None, upload_to_voe_bytes, file_bytes, fname)
             else:
                 voe_link, err = None, "Message reference nahi mila"
 
-        session["done_eps"] += 1
-
         if voe_link:
-            saved, fb_err = save_to_firebase(anime_id, season, ep_key, voe_link)
-            fb_status = "💾 Firebase ✅" if saved else "💾 Firebase ❌\n`{}`".format(fb_err)
+            # Firebase mein save karo
+            saved = save_to_firebase(anime_id, season, ep_num, voe_link)
+            fb_status = "✅ Firebase saved!" if saved else "⚠️ Firebase save fail"
+            all_success.append({"quality": quality, "link": voe_link})
             await status_msg.edit(
-                "✅ **{} Done!**\n"
-                "🔗 `{}`\n"
-                "📺 `{}` | `{}`\n"
-                "{}".format(ep_key, voe_link, anime_id, season, fb_status)
+                "✅ `{}` done!\n🔗 `{}`\n{}".format(quality, voe_link, fb_status)
             )
         else:
-            await status_msg.edit(
-                "❌ **{} Fail!** `{}`".format(ep_key, err)
+            await status_msg.edit("❌ `{}` fail: {}".format(quality, err))
+
+        time.sleep(1)
+
+    session["done_eps"] += 1
+
+    if all_success:
+        q_lines = "\n".join(["• {}: `{}`".format(x["quality"], x["link"]) for x in all_success])
+        await client.send_message(
+            chat_id,
+            "🎉 **{} Complete!**\n\n{}\n\n📁 Firebase: `Animes/{}/{}/{}`".format(
+                ep_key, q_lines, anime_id, season, ep_key
             )
-
-    except Exception as e:
-        logger.error("upload_task error: {}".format(e))
-        await status_msg.edit("❌ **{}** unexpected error: `{}`".format(ep_key, str(e)))
-
-    finally:
-        uploading.discard(ep_num)
+        )
+    else:
+        await client.send_message(chat_id, "❌ **{} Fail!**".format(ep_key))
 
 
 # ══════════════════════════════════════════════════════
-#   BOT
+#   BOT COMMANDS
 # ══════════════════════════════════════════════════════
 
 app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -347,17 +323,16 @@ def is_allowed(message):
 async def cmd_start(client, message: Message):
     if not is_allowed(message):
         return
-    fb_status = "✅ Connected" if firebase_ok else "❌ Not Connected"
     await message.reply(
         "🎌 **AnimeVerse Upload Bot**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "**Step 1:** `/setup anime-slug S1`\n"
-        "**Step 2:** Files bhejo — turant upload shuru!\n\n"
+        "**Step 2:** Saari files forward karo\n"
+        "**Step 3:** `/done` — upload shuru!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 `/status` — dekho kya upload ho raha hai\n"
-        "🔄 `/reset` — session clear karo\n"
-        "🔥 Firebase: `{}`\n\n"
-        "500MB tak, sab parallel + Firebase save! 🚀".format(fb_status)
+        "📋 `/status` | 🔄 `/reset`\n\n"
+        "500MB tak support! 🚀\n"
+        "VoE link auto Firebase mein save hoga! 🔥"
     )
 
 
@@ -369,7 +344,7 @@ async def cmd_setup(client, message: Message):
     if len(parts) < 3:
         await message.reply("❌ Format: `/setup anime-slug S1`")
         return
-    slug       = parts[1].lower()
+    slug = parts[1].lower()
     season_raw = parts[2].upper()
     if not season_raw.startswith("S") or not season_raw[1:].isdigit():
         await message.reply("❌ Season format galat! Use: S1, S2, S3...")
@@ -377,13 +352,32 @@ async def cmd_setup(client, message: Message):
     reset_all()
     session["anime_id"] = slug
     session["season"]   = season_raw
-    fb_warn = "\n⚠️ Firebase connected nahi hai!" if not firebase_ok else ""
     await message.reply(
         "✅ **Setup Done!**\n"
         "📺 Anime: `{}`\n"
-        "🎬 Season: `{}`\n{}\n\n"
-        "Ab files bhejo — har file receive hote hi upload shuru! ⚡\n"
-        "VoE link automatically Firebase mein save hoga 🔥".format(slug, season_raw, fb_warn)
+        "🎬 Season: `{}`\n\n"
+        "Ab saari files forward karo!\n"
+        "Caption se EP + Quality auto-detect hoga 🤖\n"
+        "/done jab sab bhej do.".format(slug, season_raw)
+    )
+
+
+@app.on_message(filters.command("done"))
+async def cmd_done(client, message: Message):
+    if not is_allowed(message):
+        return
+    if not ep_buffer:
+        await message.reply("✅ Koi pending episode nahi!")
+        return
+    pending = list(ep_buffer.keys())
+    await message.reply("⚙️ **{} pending episodes process ho rahe hain...**".format(len(pending)))
+    for ep_num in sorted(pending):
+        files = ep_buffer.pop(ep_num)
+        await process_ep(client, message.chat.id, ep_num, files)
+    await message.reply(
+        "🏁 **Sab Complete!**\n"
+        "✅ **{} episodes** VoE + Firebase!\n"
+        "📺 `{}` | `{}`".format(session["done_eps"], session["anime_id"], session["season"])
     )
 
 
@@ -392,25 +386,18 @@ async def cmd_status(client, message: Message):
     if not is_allowed(message):
         return
     if not session["anime_id"]:
-        await message.reply(
-            "ℹ️ Koi session nahi.\n`/setup anime-slug S1` se shuru karo."
-        )
+        await message.reply("ℹ️ Koi session nahi.\n`/setup anime-slug S1` se shuru karo.")
         return
-    up_list = ", ".join(
-        ["E{}".format(str(e).zfill(2)) for e in sorted(uploading)]
-    ) or "Koi nahi"
-    fb_status = "✅ Connected" if firebase_ok else "❌ Not Connected"
-    await message.reply(
-        "📋 **Status:**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📺 `{}` | `{}`\n"
-        "✅ Done: `{} episodes`\n"
-        "⚙️ Abhi upload ho rahe: `{}`\n"
-        "🔥 Firebase: `{}`".format(
-            session["anime_id"], session["season"],
-            session["done_eps"], up_list, fb_status
-        )
-    )
+    lines = [
+        "📋 **Status:**\n━━━━━━━━━━━━━━━━━━━━",
+        "📺 `{}` | `{}`".format(session["anime_id"], session["season"]),
+        "✅ Done: `{} episodes`".format(session["done_eps"]),
+        "⏳ Buffer: `{} episodes`".format(len(ep_buffer))
+    ]
+    for ep_num in sorted(ep_buffer.keys()):
+        ep_key = "E{}".format(str(ep_num).zfill(2))
+        lines.append("  {}: {} file(s)".format(ep_key, len(ep_buffer[ep_num])))
+    await message.reply("\n".join(lines))
 
 
 @app.on_message(filters.command("reset"))
@@ -418,9 +405,7 @@ async def cmd_reset(client, message: Message):
     if not is_allowed(message):
         return
     reset_all()
-    await message.reply(
-        "🔄 **Reset done!** `/setup anime-slug S1` se shuru karo."
-    )
+    await message.reply("🔄 **Reset done!**")
 
 
 @app.on_message(filters.video | filters.document)
@@ -438,51 +423,79 @@ async def handle_file(client, message: Message):
     caption   = message.caption or ""
 
     if file_size > LIMIT_BYTES:
-        await message.reply(
-            "❌ File {}MB. Limit 500MB hai.".format(
-                round(file_size / 1024 / 1024, 1)
-            )
-        )
+        await message.reply("❌ File {}MB. Limit 500MB hai.".format(round(file_size / 1024 / 1024, 1)))
         return
 
-    ep_num = parse_ep(caption) or parse_ep(file_name)
+    ep_num, quality = parse_caption(caption)
+    if not ep_num:
+        ep_num, quality = parse_caption(file_name)
 
     if not ep_num:
         await message.reply(
             "⚠️ **Episode detect nahi hua!**\n"
             "Caption: `{}`\n\n"
-            "Caption mein `EP04` ya `Episode 04` ya `E04` hona chahiye.".format(
-                caption[:100]
-            )
+            "Caption mein `EP04` ya `Episode - 04` hona chahiye.".format(caption[:100])
         )
         return
 
     ep_key  = "E{}".format(str(ep_num).zfill(2))
     size_mb = round(file_size / (1024 * 1024), 1)
+    quality = quality or "1080p"
 
-    if ep_num in uploading:
-        await message.reply(
-            "⚠️ **{}** pehle se upload ho raha hai! Skip.".format(ep_key)
-        )
-        return
-
-    uploading.add(ep_num)
-
-    f = {
-        "file_id": file_id,
-        "size":    file_size,
-        "name":    file_name,
-        "tg_msg":  message,
-    }
-
-    await message.reply(
-        "⚡ **{}** ({}MB) — upload shuru!\n"
-        "`{}` | `{}`".format(ep_key, size_mb, session["anime_id"], session["season"])
+    wait = await message.reply(
+        "📥 File mili!\n"
+        "📦 **{}** | `{}` | `{}`\n"
+        "🎬 `{}` | `{}` | `{}`\n\n"
+        "Upload shuru ho raha hai...".format(ep_key, quality, "{}MB".format(size_mb), session["anime_id"], session["season"], file_name)
     )
 
-    asyncio.create_task(upload_task(client, message.chat.id, ep_num, f))
+    # Direct upload — koi buffer nahi
+    fname = "{}_{}_{}_{}.mp4".format(session["anime_id"], session["season"], ep_key, quality)
+
+    if file_size <= 20 * 1024 * 1024:
+        await wait.edit("🎬 VoE pe upload ho raha hai...\n**{}** `{}` ({}MB)".format(ep_key, quality, size_mb))
+        loop = asyncio.get_event_loop()
+        voe_link, err = await loop.run_in_executor(None, upload_to_voe_stream, file_id, fname)
+    else:
+        last_update = [0]
+
+        async def progress(current, total):
+            now = time.time()
+            if now - last_update[0] < 3:
+                return
+            last_update[0] = now
+            bar = progress_bar(current, total)
+            try:
+                await wait.edit("📥 Download ho raha hai...\n**{}** `{}`\n\n{}".format(ep_key, quality, bar))
+            except Exception:
+                pass
+
+        await wait.edit(
+            "📥 Download ho raha hai...\n**{}** `{}` ({}MB)\n\n[░░░░░░░░░░░░░░░░░░░░] 0%".format(ep_key, quality, size_mb)
+        )
+        file_data = await client.download_media(message, in_memory=True, progress=progress)
+        file_bytes = bytes(file_data.getvalue())
+
+        await wait.edit("✅ Download done!\n⬆️ VoE pe upload ho raha hai... **{}**".format(ep_key))
+        loop = asyncio.get_event_loop()
+        voe_link, err = await loop.run_in_executor(None, upload_to_voe_bytes, file_bytes, fname)
+
+    if voe_link:
+        saved = save_to_firebase(session["anime_id"], session["season"], ep_num, voe_link)
+        fb_status = "✅ Firebase saved!" if saved else "⚠️ Firebase save fail"
+        session["done_eps"] += 1
+        await wait.edit(
+            "✅ **Done!**\n\n"
+            "📦 **{}** | `{}` | {}MB\n"
+            "🎬 `{}` | `{}`\n\n"
+            "🔗 VoE: `{}`\n"
+            "{}".format(ep_key, quality, size_mb, session["anime_id"], session["season"], voe_link, fb_status)
+        )
+    else:
+        await wait.edit("❌ Upload fail: {}\n**{}**".format(err, ep_key))
 
 
 if __name__ == "__main__":
+    init_firebase()
     logger.info("Bot start ho raha hai...")
     app.run()

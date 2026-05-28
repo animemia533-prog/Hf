@@ -496,6 +496,6 @@ if __name__ == "__main__":
         download_semaphore = asyncio.Semaphore(3)
         await app.start()
         logger.info("Bot chal raha hai... ✅")
-        await asyncio.Event().wait()  # hamesha chalta rahe
+        await idle()  # hamesha chalta rahe
 
     asyncio.run(main())

@@ -156,6 +156,13 @@ def get_voe_server():
 
 
 def parse_voe_response(udata):
+    # Format 1: success True with file object
+    if udata.get("success"):
+        file_obj = udata.get("file") or {}
+        fc = file_obj.get("file_code") or file_obj.get("code") or ""
+        if fc:
+            return "https://voe.sx/e/{}".format(fc), None
+    # Format 2: status 200 with result array
     if udata.get("status") == 200:
         result = udata.get("result", [{}])
         if isinstance(result, list) and result:

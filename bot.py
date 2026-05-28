@@ -10,7 +10,7 @@ import asyncio
 import requests
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 import firebase_admin
 from firebase_admin import credentials, db as firebase_db
@@ -28,10 +28,7 @@ FIREBASE_CRED_JSON = os.environ.get("FIREBASE_CRED_JSON", "")
 
 LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
 
-# Max 3 downloads ek saath — Railway RAM overflow se bachao
-download_semaphore = None  # asyncio.Semaphore — app start hone ke baad init hoga
-
-# Thread pool — parallel VoE uploads ke liye
+download_semaphore = None
 executor = ThreadPoolExecutor(max_workers=8)
 
 # ══════════════════════════════════════════════════════
@@ -109,12 +106,10 @@ def parse_ep(text):
 def extract_voe_link(udata):
     fc = None
 
-    # Naya format: {"success": True, "file": {"file_code": "xxx"}}
     if udata.get("success") and udata.get("file"):
         f  = udata["file"]
         fc = f.get("file_code") or f.get("filecode") or f.get("code", "")
 
-    # Purana format: {"status": 200, "result": [{"file_code": "xxx"}]}
     elif udata.get("status") == 200:
         result = udata.get("result", [{}])
         if isinstance(result, list) and result:
@@ -159,12 +154,7 @@ def get_telegram_url(file_id):
         return None
 
 
-# ══════════════════════════════════════════════════════
-#   VOE UPLOAD
-# ══════════════════════════════════════════════════════
-
 def upload_to_voe_stream(file_id, filename):
-    """20MB tak — Telegram CDN se stream karke VoE pe upload"""
     try:
         upload_url, err = get_voe_upload_url()
         if err:
@@ -197,7 +187,6 @@ def upload_to_voe_stream(file_id, filename):
 
 
 def upload_to_voe_bytes(file_bytes, filename):
-    """20MB se badi files — bytes upload"""
     try:
         upload_url, err = get_voe_upload_url()
         if err:
@@ -239,7 +228,7 @@ def progress_bar(current, total):
 
 
 # ══════════════════════════════════════════════════════
-#   UPLOAD TASK — har episode ke liye alag parallel task
+#   UPLOAD TASK
 # ══════════════════════════════════════════════════════
 
 async def upload_task(client, chat_id, ep_num, f):
@@ -261,12 +250,10 @@ async def upload_task(client, chat_id, ep_num, f):
         loop = asyncio.get_event_loop()
 
         if f["size"] <= 20 * 1024 * 1024:
-            # Chhoti file — direct stream, semaphore ki zaroorat nahi
             voe_link, err = await loop.run_in_executor(
                 executor, upload_to_voe_stream, file_id, fname
             )
         else:
-            # Badi file — pehle download, phir upload
             last_update = [0]
 
             async def progress(current, total):
@@ -284,20 +271,25 @@ async def upload_task(client, chat_id, ep_num, f):
 
             tg_msg = f.get("tg_msg")
             if not tg_msg:
-                await status_msg.edit("❌ **{}** message reference nahi mila.".format(ep_key))
+                await status_msg.edit(
+                    "❌ **{}** message reference nahi mila.".format(ep_key)
+                )
                 return
 
-            # Semaphore — max 3 parallel downloads
             async with download_semaphore:
-                await status_msg.edit("📥 **{}** download queue mein...".format(ep_key))
+                await status_msg.edit(
+                    "📥 **{}** download shuru...".format(ep_key)
+                )
                 file_data = await client.download_media(
                     tg_msg, in_memory=True, progress=progress
                 )
 
             file_bytes = bytes(file_data.getvalue())
-            del file_data  # RAM free karo turant
+            del file_data
 
-            await status_msg.edit("⬆️ **{}** VoE pe ja raha hai...".format(ep_key))
+            await status_msg.edit(
+                "⬆️ **{}** VoE pe ja raha hai...".format(ep_key)
+            )
 
             voe_link, err = await loop.run_in_executor(
                 executor, upload_to_voe_bytes, file_bytes, fname
@@ -321,14 +313,16 @@ async def upload_task(client, chat_id, ep_num, f):
 
     except Exception as e:
         logger.error("upload_task {}: {}".format(ep_key, e))
-        await status_msg.edit("❌ **{}** unexpected error: `{}`".format(ep_key, str(e)))
+        await status_msg.edit(
+            "❌ **{}** unexpected error: `{}`".format(ep_key, str(e))
+        )
 
     finally:
         uploading.discard(ep_num)
 
 
 # ══════════════════════════════════════════════════════
-#   BOT INIT — workers=16 for parallel handling
+#   BOT INIT
 # ══════════════════════════════════════════════════════
 
 app = Client(
@@ -489,13 +483,13 @@ async def handle_file(client, message: Message):
 #   MAIN
 # ══════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    # Semaphore event loop shuru hone ke baad banao
-    async def main():
-        global download_semaphore
-        download_semaphore = asyncio.Semaphore(3)
-        await app.start()
-        logger.info("Bot chal raha hai... ✅")
-        await idle()  # hamesha chalta rahe
+async def main():
+    global download_semaphore
+    download_semaphore = asyncio.Semaphore(3)
+    await app.start()
+    logger.info("Bot chal raha hai... ✅")
+    await idle()
 
+
+if __name__ == "__main__":
     asyncio.run(main())

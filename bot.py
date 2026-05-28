@@ -20,7 +20,7 @@ API_HASH      = os.environ.get("API_HASH", "")
 BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
 VOE_KEY       = os.environ.get("VOE_KEY", "")
 ALLOWED_USER  = int(os.environ.get("ALLOWED_USER", "0"))
-FIREBASE_URL  = os.environ.get("FIREBASE_URL", "")   # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+FIREBASE_URL  = os.environ.get("FIREBASE_URL", "") or os.environ.get("FIREBASE_DB_URL", "")   # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
 FIREBASE_CRED = os.environ.get("FIREBASE_CRED", "")  # key.json ka content (JSON string)
 
 LIMIT_BYTES   = 500 * 1024 * 1024  # 500MB
@@ -42,6 +42,9 @@ def init_firebase():
             return
 
         cred_dict = json.loads(FIREBASE_CRED)
+        # Fix: private_key ke newlines restore karo
+        if "private_key" in cred_dict:
+            cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
         cred = credentials.Certificate(cred_dict)
 
         if not firebase_admin._apps:

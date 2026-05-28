@@ -20,36 +20,47 @@ from firebase_admin import credentials, db as firebase_db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_ID             = int(os.environ.get("API_ID", "0"))
-API_HASH           = os.environ.get("API_HASH", "")
-BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
-VOE_KEY            = os.environ.get("VOE_KEY", "")
-ALLOWED_USER       = int(os.environ.get("ALLOWED_USER", "0"))
-FIREBASE_DB_URL    = os.environ.get("FIREBASE_DB_URL", "")
-FIREBASE_CRED_FILE = os.environ.get("FIREBASE_CRED_FILE", "firebase_credentials.json")
-
-LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
+API_ID       = int(os.environ.get("API_ID", "0"))
+API_HASH     = os.environ.get("API_HASH", "")
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
+VOE_KEY      = os.environ.get("VOE_KEY", "")
+ALLOWED_USER = int(os.environ.get("ALLOWED_USER", "0"))
+FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "")
 
 # ══════════════════════════════════════════════════════
-#   FIREBASE INIT — JSON file se
+#   FIREBASE INIT — Repo mein rakhi firebase_credentials.json se
 # ══════════════════════════════════════════════════════
+
+CRED_FILE = os.path.join(os.path.dirname(__file__), "firebase_credentials.json")
 
 firebase_ok = False
 
 try:
-    cred = credentials.Certificate(FIREBASE_CRED_FILE)
+    if not os.path.exists(CRED_FILE):
+        raise FileNotFoundError("firebase_credentials.json nahi mili! Repo mein rakho.")
+    if not FIREBASE_DB_URL:
+        raise ValueError("FIREBASE_DB_URL environment variable set nahi hai!")
+
+    cred = credentials.Certificate(CRED_FILE)
     firebase_admin.initialize_app(cred, {
         "databaseURL": FIREBASE_DB_URL
     })
     firebase_ok = True
-    logger.info("✅ Firebase connected!")
+    logger.info("✅ Firebase connected! DB: {}".format(FIREBASE_DB_URL))
+
+except FileNotFoundError as e:
+    logger.error("❌ {}".format(e))
+except ValueError as e:
+    logger.error("❌ {}".format(e))
 except Exception as e:
     logger.error("❌ Firebase init error: {}".format(e))
+
+LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
 
 
 def save_to_firebase(slug, season, ep_key, voe_link):
     if not firebase_ok:
-        return False, "Firebase initialize nahi hua — credentials check karo"
+        return False, "Firebase initialize nahi hua — firebase_credentials.json check karo"
     try:
         ref = firebase_db.reference("Animes/{}/{}/{}".format(slug, season, ep_key))
         ref.set({

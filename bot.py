@@ -8,7 +8,6 @@ Flow:
 
 import re
 import os
-import json
 import time
 import asyncio
 import requests
@@ -27,26 +26,30 @@ BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
 VOE_KEY            = os.environ.get("VOE_KEY", "")
 ALLOWED_USER       = int(os.environ.get("ALLOWED_USER", "0"))
 FIREBASE_DB_URL    = os.environ.get("FIREBASE_DB_URL", "")
-FIREBASE_CRED_JSON = os.environ.get("FIREBASE_CRED_JSON", "")
+FIREBASE_CRED_FILE = os.environ.get("FIREBASE_CRED_FILE", "firebase_credentials.json")
 
 LIMIT_BYTES = 500 * 1024 * 1024  # 500MB
 
 # ══════════════════════════════════════════════════════
-#   FIREBASE INIT
+#   FIREBASE INIT — JSON file se
 # ══════════════════════════════════════════════════════
 
+firebase_ok = False
+
 try:
-    cred_dict = json.loads(FIREBASE_CRED_JSON)
-    cred = credentials.Certificate(cred_dict)
+    cred = credentials.Certificate(FIREBASE_CRED_FILE)
     firebase_admin.initialize_app(cred, {
         "databaseURL": FIREBASE_DB_URL
     })
-    logger.info("Firebase connected!")
+    firebase_ok = True
+    logger.info("✅ Firebase connected!")
 except Exception as e:
-    logger.error("Firebase init error: {}".format(e))
+    logger.error("❌ Firebase init error: {}".format(e))
 
 
 def save_to_firebase(slug, season, ep_key, voe_link):
+    if not firebase_ok:
+        return False, "Firebase initialize nahi hua — credentials check karo"
     try:
         ref = firebase_db.reference("Animes/{}/{}/{}".format(slug, season, ep_key))
         ref.set({
@@ -54,11 +57,11 @@ def save_to_firebase(slug, season, ep_key, voe_link):
             "server": "Player4u",
             "time":   int(time.time())
         })
-        logger.info("Firebase saved: {}/{}/{}".format(slug, season, ep_key))
-        return True
+        logger.info("✅ Firebase saved: {}/{}/{}".format(slug, season, ep_key))
+        return True, None
     except Exception as e:
-        logger.error("Firebase error: {}".format(e))
-        return False
+        logger.error("❌ Firebase error: {}".format(e))
+        return False, str(e)
 
 
 # ══════════════════════════════════════════════════════
@@ -104,11 +107,6 @@ def parse_ep(text):
 # ══════════════════════════════════════════════════════
 
 def extract_voe_link(udata):
-    """
-    VoE ke alag alag response formats handle karta hai:
-    Format 1: {"success": True, "file": {"file_code": "xxx"}}
-    Format 2: {"status": 200, "result": [{"file_code": "xxx"}]}
-    """
     fc = None
 
     # Format 1 — naya VoE format
@@ -300,8 +298,8 @@ async def upload_task(client, chat_id, ep_num, f):
         session["done_eps"] += 1
 
         if voe_link:
-            saved     = save_to_firebase(anime_id, season, ep_key, voe_link)
-            fb_status = "💾 Firebase ✅" if saved else "💾 Firebase ❌"
+            saved, fb_err = save_to_firebase(anime_id, season, ep_key, voe_link)
+            fb_status = "💾 Firebase ✅" if saved else "💾 Firebase ❌\n`{}`".format(fb_err)
             await status_msg.edit(
                 "✅ **{} Done!**\n"
                 "🔗 `{}`\n"
@@ -312,6 +310,10 @@ async def upload_task(client, chat_id, ep_num, f):
             await status_msg.edit(
                 "❌ **{} Fail!** `{}`".format(ep_key, err)
             )
+
+    except Exception as e:
+        logger.error("upload_task error: {}".format(e))
+        await status_msg.edit("❌ **{}** unexpected error: `{}`".format(ep_key, str(e)))
 
     finally:
         uploading.discard(ep_num)
@@ -334,6 +336,7 @@ def is_allowed(message):
 async def cmd_start(client, message: Message):
     if not is_allowed(message):
         return
+    fb_status = "✅ Connected" if firebase_ok else "❌ Not Connected"
     await message.reply(
         "🎌 **AnimeVerse Upload Bot**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -341,8 +344,9 @@ async def cmd_start(client, message: Message):
         "**Step 2:** Files bhejo — turant upload shuru!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📋 `/status` — dekho kya upload ho raha hai\n"
-        "🔄 `/reset` — session clear karo\n\n"
-        "500MB tak, sab parallel + Firebase save! 🚀"
+        "🔄 `/reset` — session clear karo\n"
+        "🔥 Firebase: `{}`\n\n"
+        "500MB tak, sab parallel + Firebase save! 🚀".format(fb_status)
     )
 
 
@@ -362,12 +366,13 @@ async def cmd_setup(client, message: Message):
     reset_all()
     session["anime_id"] = slug
     session["season"]   = season_raw
+    fb_warn = "\n⚠️ Firebase connected nahi hai!" if not firebase_ok else ""
     await message.reply(
         "✅ **Setup Done!**\n"
         "📺 Anime: `{}`\n"
-        "🎬 Season: `{}`\n\n"
+        "🎬 Season: `{}`\n{}\n\n"
         "Ab files bhejo — har file receive hote hi upload shuru! ⚡\n"
-        "VoE link automatically Firebase mein save hoga 🔥".format(slug, season_raw)
+        "VoE link automatically Firebase mein save hoga 🔥".format(slug, season_raw, fb_warn)
     )
 
 
@@ -383,14 +388,16 @@ async def cmd_status(client, message: Message):
     up_list = ", ".join(
         ["E{}".format(str(e).zfill(2)) for e in sorted(uploading)]
     ) or "Koi nahi"
+    fb_status = "✅ Connected" if firebase_ok else "❌ Not Connected"
     await message.reply(
         "📋 **Status:**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📺 `{}` | `{}`\n"
         "✅ Done: `{} episodes`\n"
-        "⚙️ Abhi upload ho rahe: `{}`".format(
+        "⚙️ Abhi upload ho rahe: `{}`\n"
+        "🔥 Firebase: `{}`".format(
             session["anime_id"], session["season"],
-            session["done_eps"], up_list
+            session["done_eps"], up_list, fb_status
         )
     )
 

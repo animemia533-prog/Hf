@@ -37,15 +37,24 @@ def init_firebase():
         import firebase_admin
         from firebase_admin import credentials, db
 
-        if not FIREBASE_URL or not FIREBASE_CRED:
-            logger.warning("Firebase config nahi mila — skip")
+        if not FIREBASE_URL:
+            logger.warning("FIREBASE_URL nahi mila, skip")
             return
 
-        cred_dict = json.loads(FIREBASE_CRED)
-        # Fix: private_key ke newlines restore karo
-        if "private_key" in cred_dict:
-            cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
-        cred = credentials.Certificate(cred_dict)
+        if os.path.exists("/app/key.json"):
+            cred = credentials.Certificate("/app/key.json")
+            logger.info("Firebase: key.json use kar raha hai")
+        elif FIREBASE_CRED:
+            cred_str = FIREBASE_CRED.strip()
+            cred_dict = json.loads(cred_str)
+            pk = cred_dict.get("private_key", "")
+            pk = pk.replace("\\n", chr(10))
+            cred_dict["private_key"] = pk
+            cred = credentials.Certificate(cred_dict)
+            logger.info("Firebase: env var use kar raha hai")
+        else:
+            logger.warning("Firebase credentials nahi mila, skip")
+            return
 
         if not firebase_admin._apps:
             firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})

@@ -1,30 +1,23 @@
 import os
 import base64
 import asyncio
-from flask import Flask, Response, redirect, request, render_template_string
+from flask import Flask, Response, request, render_template_string
 from pyrogram import Client
-
-app = Flask(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 
-# Single event loop
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
+# Alag session naam — bot.py se conflict nahi hoga
 pyro = Client(
-    "streamer",
+    "streamer_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True
 )
 
-# Pyrogram start karo — blocking se pehle
-loop.run_until_complete(pyro.start())
-print("✅ Pyrogram ready!")
+app = Flask(__name__)
 
 PLAYER_HTML = """<!DOCTYPE html>
 <html><head>
@@ -55,30 +48,40 @@ def decode(encoded: str) -> str:
         encoded += "=" * pad
     return base64.urlsafe_b64decode(encoded.encode()).decode()
 
-def _stream_response(file_id: str, download: bool = False):
-    def generate():
-        async def _gen():
-            async for chunk in pyro.stream_media(file_id):
-                yield chunk
-        
-        agen = _gen().__aiter__()
-        while True:
-            try:
-                chunk = loop.run_until_complete(agen.__anext__())
-                yield chunk
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                print(f"Stream error: {e}")
-                break
+def stream_file(file_id: str, download: bool = False):
+    async def run():
+        await pyro.start()
+        chunks = []
+        async for chunk in pyro.stream_media(file_id):
+            chunks.append(chunk)
+        await pyro.stop()
+        return chunks
 
-    headers = {
-        "Content-Type": "video/mp4",
-        "Accept-Ranges": "bytes",
-    }
+    def generate():
+        loop = asyncio.new_event_loop()
+        try:
+            async def _stream():
+                if not pyro.is_connected:
+                    await pyro.start()
+                async for chunk in pyro.stream_media(file_id):
+                    yield chunk
+
+            agen = _stream()
+            while True:
+                try:
+                    chunk = loop.run_until_complete(agen.__anext__())
+                    yield chunk
+                except StopAsyncIteration:
+                    break
+                except Exception as e:
+                    print(f"Chunk error: {e}")
+                    break
+        finally:
+            loop.close()
+
+    headers = {"Content-Type": "video/mp4", "Accept-Ranges": "bytes"}
     if download:
         headers["Content-Disposition"] = "attachment"
-    
     return Response(generate(), status=200, headers=headers)
 
 @app.route("/")
@@ -92,30 +95,27 @@ def watch(enc):
 @app.route("/stream/<enc>")
 def stream(enc):
     try:
-        file_id = decode(enc)
-    except:
-        return "Invalid link", 400
-    return _stream_response(file_id)
+        return stream_file(decode(enc))
+    except Exception as e:
+        return f"Error: {e}", 500
 
 @app.route("/download/<enc>")
 def download(enc):
     try:
-        file_id = decode(enc)
-    except:
-        return "Invalid link", 400
-    return _stream_response(file_id, download=True)
+        return stream_file(decode(enc), download=True)
+    except Exception as e:
+        return f"Error: {e}", 500
 
 @app.route("/<enc>")
 def clean_url(enc):
-    if enc in ("favicon.ico",):
+    if enc == "favicon.ico":
         return "", 404
     try:
-        file_id = decode(enc)
-    except:
-        return "Invalid link", 400
-    return _stream_response(file_id)
+        return stream_file(decode(enc))
+    except Exception as e:
+        return f"Error: {e}", 500
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    print(f"🌐 Server: http://0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, threaded=False)
+    print(f"🌐 Server ready: http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, threaded=True)

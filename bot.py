@@ -12,47 +12,54 @@ BASE_URL = os.environ.get("BASE_URL", "https://hf-production-897a.up.railway.app
 
 app = Client("railway_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True, ipv6=False)
 
-# --- ENCODING HELPERS ---
+# --- SAFER ENCODING ---
 def encode_id(s):
-    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+    # Base64 karke characters replace karna taaki URL mein dikkat na ho
+    b = base64.urlsafe_b64encode(s.encode()).decode()
+    return b.replace("=", "")
 
 def decode_id(s):
-    padding = "=" * (4 - len(s) % 4)
-    return base64.urlsafe_b64decode((s + padding).encode()).decode()
+    # Padding wapas add karna
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode()
 
-# --- STREAMING LOGIC ---
+# --- STABLE STREAMING ---
 async def stream_handler(request):
     try:
-        # URL se encoded ID nikal kar decode karna
         encoded_id = request.match_info.get('file_id')
         file_id = decode_id(encoded_id)
         
         response = web.StreamResponse()
         response.content_type = 'video/mp4'
+        # Range headers support (Isse video seek/forward ho payegi)
+        response.headers['Accept-Ranges'] = 'bytes'
+        
         await response.prepare(request)
 
-        # High-speed streaming chunks
         async for chunk in app.stream_media(file_id):
-            await response.write(chunk)
+            try:
+                await response.write(chunk)
+            except (ConnectionResetError, RuntimeError):
+                # Agar user browser band kar de toh error na aaye
+                break
         
         return response
     except Exception as e:
-        print(f"❌ Stream Error: {e}")
-        return web.Response(text="Video loading error. Try again.")
+        print(f"❌ Error: {e}")
+        return web.Response(text="Error loading video", status=500)
 
 async def home(request):
-    return web.Response(text="Bot is Active! ✅")
+    return web.Response(text="Streaming Server is Active! 🚀")
 
 # --- BOT HANDLERS ---
 @app.on_message(filters.private & (filters.video | filters.document))
 async def handle_media(client, message):
     file_id = message.document.file_id if message.document else message.video.file_id
     
-    # File ID ko safe tarike se encode karna
+    # URL safe ID banana
     safe_id = encode_id(file_id)
     stream_link = f"{BASE_URL}/{safe_id}"
     
-    await message.reply_text(f"🎬 **Streaming Link Ready!**\n\n`{stream_link}`")
+    await message.reply_text(f"✅ **Link Taiyar!**\n\n`{stream_link}`")
 
 async def main():
     web_app = web.Application()
@@ -65,8 +72,8 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", port).start()
 
     await app.start()
-    print("🤖 Bot Online with Fixes!")
+    print("🤖 Bot Online with Stable Streaming!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())

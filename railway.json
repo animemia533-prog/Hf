@@ -4,8 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python3.11 server_clean.py & python3.11 bot.py",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "startCommand": "python server_clean.py & python bot.py",
+    "restartPolicyType": "ON_FAILURE"
   }
 }

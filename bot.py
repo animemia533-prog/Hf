@@ -1,72 +1,94 @@
 import os
-import asyncio
 import base64
-from pyrogram import Client, filters
-from aiohttp import web
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-# Railway Variables
-API_ID = int(os.environ.get("API_ID", 31340851))
-API_HASH = os.environ.get("API_HASH", "46161798cbd9a770749f51afa869b77b")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8891809367:AAFynilh5Iekf8V00Fd89lFBydM46kw1ezU")
-BASE_URL = os.environ.get("BASE_URL", "https://hf-production-897a.up.railway.app")
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-app = Client("railway_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True, ipv6=False)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8080")
 
-# --- ENCODING HELPERS ---
-def encode_id(s):
-    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+def encode_file_id(file_id: str) -> str:
+    """file_id ko Base64 URL-safe encode karo (no padding)"""
+    return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
-def decode_id(s):
-    padding = "=" * (4 - len(s) % 4)
-    return base64.urlsafe_b64decode((s + padding).encode()).decode()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎬 *Video Streaming Bot*\n\n"
+        "Koi bhi video forward karo — main ek streaming link dunga!\n\n"
+        "📌 Format:\n"
+        "`https://your-domain.com/{encoded_file_id}`",
+        parse_mode="Markdown"
+    )
 
-# --- STREAMING LOGIC ---
-async def stream_handler(request):
-    try:
-        # URL se encoded ID nikal kar decode karna
-        encoded_id = request.match_info.get('file_id')
-        file_id = decode_id(encoded_id)
-        
-        response = web.StreamResponse()
-        response.content_type = 'video/mp4'
-        await response.prepare(request)
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    file_id = None
+    file_name = "video.mp4"
+    file_size = 0
+    mime_type = "video/mp4"
 
-        # High-speed streaming chunks
-        async for chunk in app.stream_media(file_id):
-            await response.write(chunk)
-        
-        return response
-    except Exception as e:
-        print(f"❌ Stream Error: {e}")
-        return web.Response(text="Video loading error. Try again.")
+    if message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name or "video.mp4"
+        file_size = message.video.file_size or 0
+        mime_type = message.video.mime_type or "video/mp4"
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("video"):
+        file_id = message.document.file_id
+        file_name = message.document.file_name or "video.mp4"
+        file_size = message.document.file_size or 0
+        mime_type = message.document.mime_type
+    elif message.video_note:
+        file_id = message.video_note.file_id
+        file_name = "video_note.mp4"
+        file_size = message.video_note.file_size or 0
 
-async def home(request):
-    return web.Response(text="Bot is Active! ✅")
+    if not file_id:
+        await message.reply_text("❌ Video nahi mila! Kripya video send/forward karein.")
+        return
 
-# --- BOT HANDLERS ---
-@app.on_message(filters.private & (filters.video | filters.document))
-async def handle_media(client, message):
-    file_id = message.document.file_id if message.document else message.video.file_id
-    
-    # File ID ko safe tarike se encode karna
-    safe_id = encode_id(file_id)
-    stream_link = f"{BASE_URL}/{safe_id}"
-    
-    await message.reply_text(f"🎬 **Streaming Link Ready!**\n\n`{stream_link}`")
+    # ✅ Base64 encode karo
+    encoded = encode_file_id(file_id)
 
-async def main():
-    web_app = web.Application()
-    web_app.router.add_get("/", home)
-    web_app.router.add_get("/{file_id}", stream_handler)
-    
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    await web.TCPSite(runner, "0.0.0.0", port).start()
+    # Links banao — bilkul us format mein jo aap chahte ho
+    stream_url  = f"{SERVER_URL}/{encoded}"          # → domain.com/QkFBQ0Fn...
+    watch_url   = f"{SERVER_URL}/watch/{encoded}"    # → Player page
+    download_url = f"{SERVER_URL}/download/{encoded}" # → Download
 
-    await app.start()
-    print("🤖 Bot Online with Fixes!")
-    await asyncio.Event().wait()
+    size_mb = file_size / (1024 * 1024) if file_size else 0
+    size_text = f"{size_mb:.1f} MB" if size_mb > 0 else "N/A"
+
+    keyboard = [
+        [InlineKeyboardButton("▶️ Stream Karo", url=watch_url)],
+        [InlineKeyboardButton("⬇️ Download Karo", url=download_url)],
+    ]
+
+    text = (
+        f"✅ *Link Ready!*\n\n"
+        f"📁 *File:* `{file_name}`\n"
+        f"📦 *Size:* {size_text}\n\n"
+        f"🔗 *Streaming Link:*\n`{stream_url}`\n\n"
+        f"🎬 *Player Link:*\n`{watch_url}`"
+    )
+
+    await message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚠️ Sirf video files support hain. Video forward karein!")
+
+def main():
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ BOT_TOKEN set karo: export BOT_TOKEN='your_token'")
+        return
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.VIDEO_NOTE, handle_video))
+    app.add_handler(MessageHandler(filters.ALL, handle_other))
+
+    print(f"🤖 Bot start! Server: {SERVER_URL}")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    main()

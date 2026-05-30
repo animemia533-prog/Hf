@@ -1,25 +1,35 @@
 import os
 import base64
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8080")
 
-def encode_file_id(file_id: str) -> str:
+bot = Client(
+    "tgbot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True
+)
+
+def encode(file_id: str) -> str:
     return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎬 *Video Streaming Bot*\n\nKoi bhi video forward karo — streaming link milega!\n\n✅ Koi size limit nahi!",
-        parse_mode="Markdown"
+@bot.on_message(filters.command("start"))
+async def start(client, message: Message):
+    await message.reply_text(
+        "🎬 **Video Streaming Bot**\n\n"
+        "Koi bhi video forward karo — streaming link milega!\n"
+        "✅ Koi size limit nahi!"
     )
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+@bot.on_message(filters.video | filters.document | filters.video_note)
+async def handle_video(client, message: Message):
     file_id = None
     file_name = "video.mp4"
     file_size = 0
@@ -41,39 +51,27 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Video nahi mila!")
         return
 
-    encoded = encode_file_id(file_id)
-    stream_url  = f"{SERVER_URL}/{encoded}"
-    watch_url   = f"{SERVER_URL}/watch/{encoded}"
-    download_url = f"{SERVER_URL}/download/{encoded}"
+    enc = encode(file_id)
+    stream_url   = f"{SERVER_URL}/{enc}"
+    watch_url    = f"{SERVER_URL}/watch/{enc}"
+    download_url = f"{SERVER_URL}/download/{enc}"
 
     size_mb = file_size / (1024 * 1024) if file_size else 0
     size_text = f"{size_mb:.1f} MB" if size_mb > 0 else "N/A"
 
-    keyboard = [
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Stream Karo", url=watch_url)],
         [InlineKeyboardButton("⬇️ Download Karo", url=download_url)],
-    ]
+    ])
 
-    text = (
-        f"✅ *Link Ready!*\n\n"
-        f"📁 *File:* `{file_name}`\n"
-        f"📦 *Size:* {size_text}\n\n"
-        f"🔗 *Streaming Link:*\n`{stream_url}`\n\n"
-        f"🎬 *Player Link:*\n`{watch_url}`"
+    await message.reply_text(
+        f"✅ **Link Ready!**\n\n"
+        f"📁 **File:** `{file_name}`\n"
+        f"📦 **Size:** {size_text}\n\n"
+        f"🔗 **Streaming Link:**\n`{stream_url}`",
+        reply_markup=keyboard
     )
 
-    await message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ Sirf video files support hain!")
-
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.VIDEO_NOTE, handle_video))
-    app.add_handler(MessageHandler(filters.ALL, handle_other))
-    print(f"🤖 Bot start! Server: {SERVER_URL}")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 if __name__ == "__main__":
-    main()
+    print("🤖 Bot start!")
+    bot.run()

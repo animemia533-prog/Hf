@@ -6,19 +6,15 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8080")
 
 def encode_file_id(file_id: str) -> str:
-    """file_id ko Base64 URL-safe encode karo (no padding)"""
     return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 *Video Streaming Bot*\n\n"
-        "Koi bhi video forward karo — main ek streaming link dunga!\n\n"
-        "📌 Format:\n"
-        "`https://your-domain.com/{encoded_file_id}`",
+        "🎬 *Video Streaming Bot*\n\nKoi bhi video forward karo — streaming link milega!\n\n✅ Koi size limit nahi!",
         parse_mode="Markdown"
     )
 
@@ -27,34 +23,28 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = None
     file_name = "video.mp4"
     file_size = 0
-    mime_type = "video/mp4"
 
     if message.video:
         file_id = message.video.file_id
         file_name = message.video.file_name or "video.mp4"
         file_size = message.video.file_size or 0
-        mime_type = message.video.mime_type or "video/mp4"
     elif message.document and message.document.mime_type and message.document.mime_type.startswith("video"):
         file_id = message.document.file_id
         file_name = message.document.file_name or "video.mp4"
         file_size = message.document.file_size or 0
-        mime_type = message.document.mime_type
     elif message.video_note:
         file_id = message.video_note.file_id
         file_name = "video_note.mp4"
         file_size = message.video_note.file_size or 0
 
     if not file_id:
-        await message.reply_text("❌ Video nahi mila! Kripya video send/forward karein.")
+        await message.reply_text("❌ Video nahi mila!")
         return
 
-    # ✅ Base64 encode karo
     encoded = encode_file_id(file_id)
-
-    # Links banao — bilkul us format mein jo aap chahte ho
-    stream_url  = f"{SERVER_URL}/{encoded}"          # → domain.com/QkFBQ0Fn...
-    watch_url   = f"{SERVER_URL}/watch/{encoded}"    # → Player page
-    download_url = f"{SERVER_URL}/download/{encoded}" # → Download
+    stream_url  = f"{SERVER_URL}/{encoded}"
+    watch_url   = f"{SERVER_URL}/watch/{encoded}"
+    download_url = f"{SERVER_URL}/download/{encoded}"
 
     size_mb = file_size / (1024 * 1024) if file_size else 0
     size_text = f"{size_mb:.1f} MB" if size_mb > 0 else "N/A"
@@ -75,18 +65,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ Sirf video files support hain. Video forward karein!")
+    await update.message.reply_text("⚠️ Sirf video files support hain!")
 
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ BOT_TOKEN set karo: export BOT_TOKEN='your_token'")
-        return
-
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.ALL, handle_other))
-
     print(f"🤖 Bot start! Server: {SERVER_URL}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

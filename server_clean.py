@@ -1,40 +1,21 @@
 import os
 import base64
 import asyncio
-import threading
-from flask import Flask, Response, request, render_template_string
+from aiohttp import web
 from pyrogram import Client
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
+PORT      = int(os.getenv("PORT", 8080))
 
-app = Flask(__name__)
-
-_loop = asyncio.new_event_loop()
-
-_client = Client(
+client = Client(
     "streamer",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
 )
-
-def _start_client():
-    asyncio.set_event_loop(_loop)
-    _loop.run_until_complete(_client.start())
-    print("✅ Pyrogram connected!")
-    _loop.run_forever()
-
-threading.Thread(target=_start_client, daemon=True).start()
-
-# Flask start hone se pehle client ready hone do
-import time
-time.sleep(5)
-
-def run(coro):
-    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=60)
 
 def decode(enc: str) -> str:
     pad = 4 - len(enc) % 4
@@ -48,99 +29,101 @@ PLAYER = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Stream</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;display:flex;align-items:center;
-     justify-content:center;min-height:100vh;font-family:sans-serif;color:#eee}
-.w{width:100%;max-width:860px;padding:16px}
-h2{text-align:center;color:#64b5f6;margin-bottom:14px}
-video{width:100%;border-radius:10px;background:#000}
-p{text-align:center;margin-top:10px;color:#666;font-size:.8rem}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0f;display:flex;align-items:center;
+     justify-content:center;min-height:100vh;font-family:sans-serif;color:#eee}}
+.w{{width:100%;max-width:860px;padding:16px}}
+h2{{text-align:center;color:#64b5f6;margin-bottom:14px}}
+video{{width:100%;border-radius:10px;background:#000}}
+p{{text-align:center;margin-top:10px;color:#666;font-size:.8rem}}
 </style></head><body>
 <div class="w">
   <h2>🎬 Video Player</h2>
   <video controls autoplay playsinline preload="auto">
-    <source src="/stream/{{enc}}" type="video/mp4">
+    <source src="/stream/{enc}" type="video/mp4">
   </video>
   <p>Telegram se directly stream ho raha hai</p>
 </div>
 </body></html>"""
 
-def _make_stream(file_id: str, download: bool = False):
-    range_header = request.headers.get("Range", "")
-    offset = 0
-    if range_header.startswith("bytes="):
-        try:
-            start = int(range_header[6:].split("-")[0])
-            offset = start // (1024 * 1024)
-        except:
-            pass
+async def stream_file(request, file_id: str, download: bool = False):
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "video/mp4",
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+            **({"Content-Disposition": "attachment; filename=video.mp4"} if download else {}),
+        }
+    )
+    await response.prepare(request)
+    try:
+        async for chunk in client.stream_media(file_id):
+            await response.write(chunk)
+    except Exception as e:
+        print(f"Stream error: {e}")
+    await response.write_eof()
+    return response
 
-    def generate():
-        async def _gen():
-            async for chunk in _client.stream_media(file_id, offset=offset):
-                yield chunk
+async def handle_watch(request):
+    enc = request.match_info["enc"]
+    html = PLAYER.format(enc=enc)
+    return web.Response(text=html, content_type="text/html")
 
-        agen = _gen().__aiter__()
-        while True:
-            try:
-                fut = asyncio.run_coroutine_threadsafe(agen.__anext__(), _loop)
-                chunk = fut.result(timeout=30)
-                yield chunk
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                print(f"Chunk error: {e}")
-                break
-
-    headers = {
-        "Content-Type": "video/mp4",
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "no-cache",
-    }
-    if download:
-        headers["Content-Disposition"] = "attachment; filename=video.mp4"
-
-    status = 206 if range_header else 200
-    return Response(generate(), status=status, headers=headers)
-
-@app.route("/")
-def index():
-    return "<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer — Ready!</h2>"
-
-@app.route("/watch/<enc>")
-def watch(enc):
-    return render_template_string(PLAYER, enc=enc)
-
-@app.route("/stream/<enc>", methods=["GET", "HEAD"])
-def stream(enc):
+async def handle_stream(request):
+    enc = request.match_info["enc"]
     try:
         file_id = decode(enc)
     except:
-        return "Invalid", 400
+        return web.Response(text="Invalid", status=400)
     if request.method == "HEAD":
-        return Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
-    return _make_stream(file_id)
+        return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
+    return await stream_file(request, file_id)
 
-@app.route("/download/<enc>")
-def download(enc):
+async def handle_download(request):
+    enc = request.match_info["enc"]
     try:
-        return _make_stream(decode(enc), download=True)
+        file_id = decode(enc)
     except:
-        return "Error", 500
+        return web.Response(text="Invalid", status=400)
+    return await stream_file(request, file_id, download=True)
 
-@app.route("/<enc>", methods=["GET", "HEAD"])
-def clean_url(enc):
+async def handle_clean(request):
+    enc = request.match_info["enc"]
     if enc == "favicon.ico":
-        return "", 404
+        return web.Response(status=404)
     try:
         file_id = decode(enc)
     except:
-        return "Invalid", 400
+        return web.Response(text="Invalid", status=400)
     if request.method == "HEAD":
-        return Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
-    return _make_stream(file_id)
+        return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
+    return await stream_file(request, file_id)
+
+async def handle_index(request):
+    return web.Response(
+        text="<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer — Ready!</h2>",
+        content_type="text/html"
+    )
+
+async def main():
+    await client.start()
+    print("✅ Pyrogram connected!")
+
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/watch/{enc}", handle_watch)
+    app.router.add_route("*", "/stream/{enc}", handle_stream)
+    app.router.add_get("/download/{enc}", handle_download)
+    app.router.add_route("*", "/{enc}", handle_clean)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Server ready on port {PORT}")
+
+    await asyncio.Event().wait()  # run forever
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    print(f"🌐 http://0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    asyncio.run(main())

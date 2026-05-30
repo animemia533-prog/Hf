@@ -11,8 +11,8 @@ API_HASH  = os.getenv("API_HASH", "")
 
 app = Flask(__name__)
 
-# ── Single persistent Pyrogram client ──────────────────────────────────────
-_loop   = asyncio.new_event_loop()
+_loop = asyncio.new_event_loop()
+
 _client = Client(
     "streamer",
     api_id=API_ID,
@@ -21,36 +21,27 @@ _client = Client(
     in_memory=True,
 )
 
-def _run_loop():
+def _start_client():
     asyncio.set_event_loop(_loop)
+    _loop.run_until_complete(_client.start())
+    print("✅ Pyrogram connected!")
     _loop.run_forever()
 
-# Background thread mein loop chalao
-threading.Thread(target=_run_loop, daemon=True).start()
+threading.Thread(target=_start_client, daemon=True).start()
 
-# Client sirf ONCE start karo
-asyncio.run_coroutine_threadsafe(_client.start(), _loop).result(timeout=30)
-print("✅ Pyrogram connected!")
+# Flask start hone se pehle client ready hone do
+import time
+time.sleep(5)
 
 def run(coro):
     return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=60)
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
 def decode(enc: str) -> str:
     pad = 4 - len(enc) % 4
     if pad != 4:
         enc += "=" * pad
     return base64.urlsafe_b64decode(enc.encode()).decode()
 
-async def _get_file_size(file_id: str) -> int:
-    try:
-        msg = await _client.get_messages("me", 1)  # dummy
-    except:
-        pass
-    # file size Pyrogram ke message se milti — yahan approximate return
-    return 0
-
-# ── Player HTML ──────────────────────────────────────────────────────────────
 PLAYER = """<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -74,20 +65,12 @@ p{text-align:center;margin-top:10px;color:#666;font-size:.8rem}
 </div>
 </body></html>"""
 
-# ── Core streaming function ──────────────────────────────────────────────────
 def _make_stream(file_id: str, download: bool = False):
-    """
-    Proper streaming with Range support aur correct headers.
-    VOE aur browsers dono ke liye kaam karega.
-    """
-
     range_header = request.headers.get("Range", "")
     offset = 0
-
     if range_header.startswith("bytes="):
         try:
             start = int(range_header[6:].split("-")[0])
-            # Pyrogram 1MB chunks use karta hai
             offset = start // (1024 * 1024)
         except:
             pass
@@ -113,7 +96,6 @@ def _make_stream(file_id: str, download: bool = False):
         "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
-        "X-Content-Type-Options": "nosniff",
     }
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
@@ -121,7 +103,6 @@ def _make_stream(file_id: str, download: bool = False):
     status = 206 if range_header else 200
     return Response(generate(), status=status, headers=headers)
 
-# ── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return "<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer — Ready!</h2>"
@@ -159,7 +140,6 @@ def clean_url(enc):
         return Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
     return _make_stream(file_id)
 
-# ── Start ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     print(f"🌐 http://0.0.0.0:{port}")

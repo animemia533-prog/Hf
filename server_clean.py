@@ -1,13 +1,42 @@
 import os
 import base64
-import requests
+import asyncio
+import threading
 from flask import Flask, Response, redirect, request, render_template_string
+from pyrogram import Client
+from pyrogram.errors import FloodWait
+import time
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-TELEGRAM_FILE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+
+# Pyrogram client (bot mode - no size limit for streaming)
+pyro_client = Client(
+    "stream_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True
+)
+
+loop = asyncio.new_event_loop()
+
+def start_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+threading.Thread(target=start_loop, args=(loop,), daemon=True).start()
+
+def run_async(coro):
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=30)
+
+def start_pyrogram():
+    run_async(pyro_client.start())
+    print("✅ Pyrogram client started!")
 
 PLAYER_HTML = """<!DOCTYPE html>
 <html><head>
@@ -39,21 +68,17 @@ def decode(encoded: str) -> str:
         encoded += "=" * pad
     return base64.urlsafe_b64decode(encoded.encode()).decode()
 
-def get_tg_url(file_id: str):
-    r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id})
-    d = r.json()
-    if d.get("ok"):
-        return f"{TELEGRAM_FILE}/{d['result']['file_path']}"
-    return None
+async def get_file_stream(file_id: str, offset: int = 0, limit: int = None):
+    """Pyrogram se file stream karo - koi size limit nahi"""
+    async for chunk in pyro_client.stream_media(file_id, offset=offset, limit=limit):
+        yield chunk
 
 @app.route("/")
 def index():
-    return "<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer</h2>"
+    return "<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer - Ready!</h2>"
 
-# ✅ Clean URL: domain.com/{encoded} → seedha stream
 @app.route("/<encoded>")
 def clean_stream(encoded):
-    # /watch/ aur /stream/ routes ke liye skip
     if encoded in ("watch", "stream", "download", "favicon.ico"):
         return "Not found", 404
     try:
@@ -80,36 +105,69 @@ def download(encoded):
         file_id = decode(encoded)
     except Exception:
         return "Invalid link", 400
-    url = get_tg_url(file_id)
-    if not url:
-        return "File nahi mila", 404
-    return redirect(url)
+    return _do_stream(file_id, download=True)
 
-def _do_stream(file_id: str):
-    url = get_tg_url(file_id)
-    if not url:
-        return "File nahi mila ya expire ho gayi", 404
+def _do_stream(file_id: str, download: bool = False):
+    range_header = request.headers.get("Range", "")
+    
+    offset = 0
+    limit = None
+    status = 200
+    content_range = None
 
-    range_header = request.headers.get("Range")
-    headers = {"Range": range_header} if range_header else {}
-    tg = requests.get(url, headers=headers, stream=True)
+    # File size pata karo
+    try:
+        msg_info = run_async(pyro_client.get_messages(
+            # dummy - we use stream_media directly
+            "me", 1
+        ))
+    except:
+        pass
 
-    resp_headers = {
-        "Content-Type": tg.headers.get("Content-Type", "video/mp4"),
+    # Range header parse karo
+    if range_header and range_header.startswith("bytes="):
+        try:
+            ranges = range_header[6:].split("-")
+            start = int(ranges[0]) if ranges[0] else 0
+            # 1MB chunks mein stream karo
+            offset = start // (1024 * 1024)
+            status = 206
+        except:
+            pass
+
+    def generate():
+        try:
+            async def stream_gen():
+                async for chunk in pyro_client.stream_media(file_id, offset=offset):
+                    yield chunk
+
+            # Sync wrapper
+            agen = stream_gen()
+            while True:
+                try:
+                    chunk = run_async(agen.__anext__())
+                    yield chunk
+                except StopAsyncIteration:
+                    break
+                except Exception as e:
+                    print(f"Stream error: {e}")
+                    break
+        except Exception as e:
+            print(f"Generate error: {e}")
+
+    headers = {
+        "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",
     }
-    for h in ("Content-Range", "Content-Length"):
-        if h in tg.headers:
-            resp_headers[h] = tg.headers[h]
+    
+    if download:
+        headers["Content-Disposition"] = "attachment"
 
-    def gen():
-        for chunk in tg.iter_content(65536):
-            if chunk:
-                yield chunk
-
-    return Response(gen(), status=tg.status_code, headers=resp_headers)
+    return Response(generate(), status=status, headers=headers)
 
 if __name__ == "__main__":
+    print("🚀 Pyrogram client start ho raha hai...")
+    start_pyrogram()
     port = int(os.getenv("PORT", 8080))
-    print(f"🌐 http://localhost:{port}")
+    print(f"🌐 Server: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port)

@@ -15,7 +15,17 @@ API_ID           = int(os.getenv("API_ID", "0"))
 API_HASH         = os.getenv("API_HASH", "")
 SERVER_URL       = os.getenv("SERVER_URL", "")
 FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
-STORAGE_CHANNEL  = int(os.getenv("STORAGE_CHANNEL_ID", "0"))  # Railway env se aayega
+STRING_SESSION   = os.getenv("STRING_SESSION", "")
+STORAGE_CHANNEL  = int(os.getenv("STORAGE_CHANNEL", "0"))
+
+# Userbot — Storage Channel mein copy karega
+userbot = Client(
+    "userbot_helper",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=STRING_SESSION,
+    no_updates=True,
+)
 
 bot = Client(
     "anime_bot",
@@ -27,10 +37,8 @@ bot = Client(
 
 user_setup: dict = {}
 
-def encode(chat_id: int, message_id: int) -> str:
-    """chat_id:message_id ko base64 mein encode karo"""
-    raw = f"{chat_id}:{message_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+def encode(file_id: str) -> str:
+    return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
 def extract_episode(text: str) -> str | None:
     if not text:
@@ -40,13 +48,12 @@ def extract_episode(text: str) -> str | None:
         return f"E{int(match.group(1)):02d}"
     return None
 
-async def firebase_save(anime, season, episode, stream_link, chat_id, message_id) -> bool:
+async def firebase_save(anime, season, episode, stream_link, message_id) -> bool:
     try:
         payload = {
-            "link":       stream_link,
-            "server":     "Player1",
-            "time":       int(time.time()),
-            "chat_id":    str(chat_id),
+            "link": stream_link,
+            "server": "Player1",
+            "time": int(time.time()),
             "message_id": str(message_id)
         }
         async with aiohttp.ClientSession() as session:
@@ -56,7 +63,7 @@ async def firebase_save(anime, season, episode, stream_link, chat_id, message_id
             ) as r:
                 return r.status == 200
     except Exception as e:
-        logging.error(f"Firebase error: {e}")
+        logging.error(f"Firebase: {e}")
         return False
 
 @bot.on_message(filters.command("start"))
@@ -81,7 +88,7 @@ async def cmd_setup(client, msg: Message):
         await msg.reply_text("❌ Season number chahiye!")
         return
     user_setup[msg.from_user.id] = {"anime": parts[1].lower(), "season": season}
-    await msg.reply_text(f"✅ `{parts[1]}` › S{season} — Ab videos forward karo!")
+    await msg.reply_text(f"✅ `{parts[1]}` › S{season} — Forward karo!")
 
 @bot.on_message(filters.command("status"))
 async def cmd_status(client, msg: Message):
@@ -98,63 +105,69 @@ async def handle_video(client, msg: Message):
         await msg.reply_text("⚠️ Pehle `/setup anime-slug season` karo!")
         return
 
-    # Sirf video files accept karo
-    is_video = False
+    file_id, file_name = None, "video.mp4"
     if msg.video:
-        is_video = True
+        file_id   = msg.video.file_id
+        file_name = msg.video.file_name or "video.mp4"
     elif msg.document and (msg.document.mime_type or "").startswith("video"):
-        is_video = True
-
-    if not is_video:
+        file_id   = msg.document.file_id
+        file_name = msg.document.file_name or "video.mp4"
+    if not file_id:
         return
 
-    episode = extract_episode(msg.caption or (msg.video.file_name if msg.video else None) or (msg.document.file_name if msg.document else None) or "")
+    episode = extract_episode(msg.caption or file_name or "")
     if not episode:
-        await msg.reply_text("⚠️ Episode number nahi mila! Caption mein likho: `01`, `7`, `12`")
+        await msg.reply_text("⚠️ Episode number nahi mila! Caption: `01`, `7`, `12`")
         return
 
     anime  = setup["anime"]
     season = setup["season"]
 
-    # Step 1: Processing message
-    processing = await msg.reply_text("⏳ Storage channel mein copy ho raha hai...")
+    status = await msg.reply_text(f"⏳ Storage mein copy ho raha hai...\n📺 `{anime}` › S{season} › {episode}")
 
     try:
-        # Step 2: Bot video ko Storage Channel mein copy kare
-        if STORAGE_CHANNEL == 0:
-            await processing.edit_text("❌ STORAGE_CHANNEL_ID set nahi hai!")
-            return
-
-        copied = await client.copy_message(
+        # Userbot se Storage Channel mein forward karo
+        stored = await userbot.forward_messages(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=msg.chat.id,
-            message_id=msg.id
+            message_ids=msg.id
         )
-
-        # Step 3: Storage channel ka chat_id aur message_id encode karo
-        enc         = encode(STORAGE_CHANNEL, copied.id)
-        stream_link = f"{SERVER_URL}/{enc}"
-
-        # Step 4: Firebase mein storage channel info save karo
-        ok = await firebase_save(
-            anime, season, episode,
-            stream_link,
-            STORAGE_CHANNEL,   # <-- storage channel ka ID
-            copied.id          # <-- copied message ka ID
-        )
-
-        await processing.edit_text(
-            f"✅ **Done!**\n\n"
-            f"📺 `{anime}` › S{season} › {episode}\n\n"
-            f"📦 Storage Channel Message ID: `{copied.id}`\n"
-            f"🔗 `{stream_link}`\n\n"
-            f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
-        )
+        stored_msg_id = stored.id
+        print(f"✅ Storage Channel mein copy: msg_id={stored_msg_id}")
 
     except Exception as e:
-        logging.error(f"Copy error: {e}")
-        await processing.edit_text(f"❌ Copy failed: `{e}`\n\nBot ko Storage Channel mein admin banao!")
+        logging.error(f"Storage forward error: {e}")
+        await status.edit_text(f"❌ Storage mein copy nahi hua!\nError: {e}")
+        return
+
+    # Storage channel message ka file_id use karo
+    stored_file_id = None
+    if stored.video:
+        stored_file_id = stored.video.file_id
+    elif stored.document:
+        stored_file_id = stored.document.file_id
+
+    if not stored_file_id:
+        await status.edit_text("❌ Stored file_id nahi mila!")
+        return
+
+    enc         = encode(stored_file_id)
+    stream_link = f"{SERVER_URL}/{enc}"
+
+    ok = await firebase_save(anime, season, episode, stream_link, stored_msg_id)
+
+    await status.edit_text(
+        f"✅ **Done!**\n\n"
+        f"📺 `{anime}` › S{season} › {episode}\n\n"
+        f"🔗 `{stream_link}`\n\n"
+        f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
+    )
+
+async def start_userbot():
+    await userbot.start()
+    print("✅ Userbot ready!")
 
 if __name__ == "__main__":
     print("🤖 Bot start!")
+    bot.loop.run_until_complete(start_userbot())
     bot.run()

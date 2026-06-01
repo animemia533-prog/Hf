@@ -4,7 +4,7 @@ import asyncio
 import aiohttp
 from aiohttp import web
 from pyrogram import Client
-from pyrogram.errors import FloodWait, FileReferenceExpired, FileReferenceEmpty
+from pyrogram.errors import FloodWait
 
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 API_ID         = int(os.getenv("API_ID", "0"))
@@ -27,8 +27,8 @@ def decode(enc: str) -> str:
         enc += "=" * pad
     return base64.urlsafe_b64decode(enc.encode()).decode()
 
-async def get_message_from_firebase(enc: str):
-    """Firebase se chat_id + message_id lo, fresh message fetch karo"""
+async def get_fresh_msg(enc: str):
+    """Firebase se chat_id/message_id lo aur fresh message lo"""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
@@ -52,11 +52,10 @@ async def get_message_from_firebase(enc: str):
                     message_id = info.get("message_id")
                     if not chat_id or not message_id:
                         return None
-                    # Fresh message object lo
                     msg = await userbot.get_messages(int(chat_id), int(message_id))
                     return msg
     except Exception as e:
-        print(f"Firebase lookup error: {e}")
+        print(f"get_fresh_msg error: {e}")
     return None
 
 PLAYER = """<!DOCTYPE html>
@@ -92,12 +91,11 @@ async def do_stream(request, enc: str, download: bool = False):
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    # Firebase se fresh message lo
-    msg = await get_message_from_firebase(enc)
-    if not msg:
+    # Fresh message lo Firebase se
+    msg = await get_fresh_msg(enc)
+    if not msg or not msg.id:
         return web.Response(
-            text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:#ff4444'>❌ Video nahi mila!<br><small>Bot se dobara forward karo</small></h3>",
-            content_type="text/html",
+            text="Video nahi mila — bot se dobara forward karo",
             status=404
         )
 
@@ -108,7 +106,6 @@ async def do_stream(request, enc: str, download: bool = False):
         )
         await resp.prepare(request)
 
-        # Message object se seedha stream karo — file_id nahi
         async for chunk in userbot.stream_media(msg, offset=offset):
             try:
                 await resp.write(chunk)
@@ -120,14 +117,11 @@ async def do_stream(request, enc: str, download: bool = False):
         return resp
 
     except FloodWait as e:
-        print(f"FloodWait: {e.value}s")
         await asyncio.sleep(e.value)
-        return web.Response(text="Try again", status=503)
+        return web.Response(text="Server busy, retry karo", status=503)
     except Exception as e:
-        err = str(e)
-        if "closing transport" not in err and "Connection" not in err:
-            print(f"Stream error: {err}")
-        return web.Response(text="Error", status=500)
+        print(f"Stream error: {e}")
+        return web.Response(text="Stream error", status=500)
 
 async def handle_index(request):
     return web.Response(
@@ -158,10 +152,9 @@ async def handle_clean(request):
     return await do_stream(request, enc)
 
 async def main():
-    print("🔗 Userbot connect ho raha hai...")
     await userbot.start()
     me = await userbot.get_me()
-    print(f"✅ Userbot ready: {me.first_name}")
+    print(f"✅ Userbot: {me.first_name}")
 
     app = web.Application(client_max_size=0)
     app.router.add_get("/", handle_index)
@@ -174,7 +167,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"🌐 Server: http://0.0.0.0:{PORT}")
+    print(f"🌐 Ready: http://0.0.0.0:{PORT}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

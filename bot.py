@@ -127,10 +127,10 @@ async def handle_video(client, msg: Message):
 
     try:
         # Userbot se Storage Channel mein forward karo
-        stored = await userbot.forward_messages(
+        stored = await userbot.copy_message(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=msg.chat.id,
-            message_ids=msg.id
+            message_id=msg.id
         )
         stored_msg_id = stored.id
         print(f"✅ Storage Channel mein copy: msg_id={stored_msg_id}")

@@ -1,174 +1,224 @@
 import os
-import re
 import base64
 import asyncio
 import aiohttp
-import logging
-import time
-from pyrogram import Client, filters
-from pyrogram.types import Message
-
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+from aiohttp import web
+from pyrogram import Client
+from pyrogram.errors import FloodWait, FileReferenceExpired, FileReferenceEmpty
 
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 API_ID         = int(os.getenv("API_ID", "0"))
 API_HASH       = os.getenv("API_HASH", "")
-SERVER_URL     = os.getenv("SERVER_URL", "")
-FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 STRING_SESSION = os.getenv("STRING_SESSION", "")
+FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
+PORT           = int(os.getenv("PORT", 8080))
 
-# Userbot — Saved Messages ke liye
+# Userbot — Saved Messages se stream karega
 userbot = Client(
-    "userbot_helper",
+    "streamer",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=STRING_SESSION,
     no_updates=True,
 )
 
-# Bot
-bot = Client(
-    "anime_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True
-)
-
-user_setup: dict = {}
+def decode(enc: str) -> str:
+    pad = 4 - len(enc) % 4
+    if pad != 4:
+        enc += "=" * pad
+    return base64.urlsafe_b64decode(enc.encode()).decode()
 
 def encode(file_id: str) -> str:
     return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
-def extract_episode(text: str) -> str | None:
-    if not text:
-        return None
-    match = re.search(r'\b(\d{1,3})\b', text)
-    if match:
-        return f"E{int(match.group(1)):02d}"
+async def refresh_from_firebase(enc: str) -> str | None:
+    """Firebase se message fetch karke fresh file_id lo"""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
+                if r.status != 200:
+                    return None
+                data = await r.json()
+        if not data:
+            return None
+
+        for anime, seasons in data.items():
+            if not isinstance(seasons, dict):
+                continue
+            for season, episodes in seasons.items():
+                if not isinstance(episodes, dict):
+                    continue
+                for ep, info in episodes.items():
+                    if not isinstance(info, dict):
+                        continue
+                    if enc not in info.get("link", ""):
+                        continue
+                    chat_id    = info.get("chat_id")
+                    message_id = info.get("message_id")
+                    if not chat_id or not message_id:
+                        return None
+                    msg = await userbot.get_messages(int(chat_id), int(message_id))
+                    if not msg:
+                        return None
+                    new_fid = None
+                    if msg.video:
+                        new_fid = msg.video.file_id
+                    elif msg.document:
+                        new_fid = msg.document.file_id
+                    if new_fid:
+                        # Firebase update
+                        new_enc  = encode(new_fid)
+                        new_link = info["link"].rsplit("/", 1)[0] + "/" + new_enc
+                        async with aiohttp.ClientSession() as s:
+                            await s.patch(
+                                f"{FIREBASE_URL}/Animes/{anime}/{season}/{ep}.json",
+                                json={"link": new_link}
+                            )
+                        print(f"✅ Refreshed: {anime}/{season}/{ep}")
+                        return new_fid
+    except Exception as e:
+        print(f"Refresh error: {e}")
     return None
 
-async def firebase_save(anime, season, episode, stream_link, chat_id, message_id) -> bool:
-    try:
-        payload = {
-            "link": stream_link,
-            "server": "Player1",
-            "time": int(time.time()),
-            "chat_id": chat_id,
-            "message_id": message_id
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.put(
-                f"{FIREBASE_URL}/Animes/{anime}/S{season}/{episode}.json",
-                json=payload
-            ) as r:
-                return r.status == 200
-    except Exception as e:
-        logging.error(f"Firebase: {e}")
-        return False
+PLAYER = """<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stream</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#000;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+video{{width:100%;max-height:100vh}}
+</style></head><body>
+<video controls autoplay playsinline preload="metadata">
+  <source src="/stream/{enc}" type="video/mp4">
+</video>
+</body></html>"""
 
-@bot.on_message(filters.command("start"))
-async def cmd_start(client, msg: Message):
-    await msg.reply_text(
-        "🎬 **Anime Upload Bot**\n\n"
-        "`/setup anime-slug season`\n"
-        "Example: `/setup naruto 1`\n\n"
-        "Phir videos forward karo!\n"
-        "Caption mein episode number: `01`, `7`, `12`"
+async def do_stream(request, file_id: str, enc: str, download: bool = False):
+    range_header = request.headers.get("Range", "")
+    offset = 0
+    if range_header.startswith("bytes="):
+        try:
+            start = int(range_header[6:].split("-")[0])
+            offset = start // (1024 * 1024)
+        except:
+            pass
+
+    headers = {
+        "Content-Type": "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-cache",
+    }
+    if download:
+        headers["Content-Disposition"] = "attachment; filename=video.mp4"
+
+    for attempt in range(2):
+        try:
+            resp = web.StreamResponse(
+                status=206 if range_header else 200,
+                headers=headers
+            )
+            await resp.prepare(request)
+
+            async for chunk in userbot.stream_media(file_id, offset=offset):
+                try:
+                    await resp.write(chunk)
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    try: await resp.write_eof()
+                    except: pass
+                    return resp
+
+            try: await resp.write_eof()
+            except: pass
+            return resp
+
+        except (FileReferenceExpired, FileReferenceEmpty):
+            if attempt == 0:
+                print(f"⚠️ Expired — refreshing...")
+                new_fid = await refresh_from_firebase(enc)
+                if new_fid:
+                    file_id = new_fid
+                    continue
+            # Refresh nahi hua
+            return web.Response(
+                text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:#ff4444'>❌ Link expire ho gaya!<br><small>Bot se dobara forward karo</small></h3>",
+                content_type="text/html",
+                status=410
+            )
+
+        except FloodWait as e:
+            print(f"FloodWait: {e.value}s")
+            await asyncio.sleep(e.value)
+            break
+
+        except Exception as e:
+            err = str(e)
+            if "closing transport" not in err and "Connection" not in err:
+                print(f"Error: {err}")
+            break
+
+    return web.Response(text="Error", status=500)
+
+async def handle_index(request):
+    return web.Response(
+        text="<h2 style='color:#64b5f6;text-align:center;margin-top:40vh;font-family:sans-serif'>🎬 TG Streamer</h2>",
+        content_type="text/html"
     )
 
-@bot.on_message(filters.command("setup"))
-async def cmd_setup(client, msg: Message):
-    parts = msg.text.split()
-    if len(parts) != 3:
-        await msg.reply_text("❌ `/setup anime-slug season`")
-        return
+async def handle_watch(request):
+    enc = request.match_info["enc"]
+    return web.Response(text=PLAYER.format(enc=enc), content_type="text/html")
+
+async def handle_stream(request):
+    enc = request.match_info["enc"]
     try:
-        season = int(parts[2])
+        file_id = decode(enc)
     except:
-        await msg.reply_text("❌ Season number chahiye!")
-        return
-    user_setup[msg.from_user.id] = {"anime": parts[1].lower(), "season": season}
-    await msg.reply_text(f"✅ `{parts[1]}` › S{season} — Forward karo!")
+        return web.Response(text="Invalid", status=400)
+    if request.method == "HEAD":
+        return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
+    return await do_stream(request, file_id, enc)
 
-@bot.on_message(filters.command("status"))
-async def cmd_status(client, msg: Message):
-    setup = user_setup.get(msg.from_user.id)
-    if not setup:
-        await msg.reply_text("⚠️ `/setup anime-slug season` karo.")
-    else:
-        await msg.reply_text(f"📌 `{setup['anime']}` › S{setup['season']}")
-
-@bot.on_message(filters.video | filters.document)
-async def handle_video(client, msg: Message):
-    setup = user_setup.get(msg.from_user.id)
-    if not setup:
-        await msg.reply_text("⚠️ Pehle `/setup anime-slug season` karo!")
-        return
-
-    file_id, file_name = None, "video.mp4"
-    if msg.video:
-        file_id   = msg.video.file_id
-        file_name = msg.video.file_name or "video.mp4"
-    elif msg.document and (msg.document.mime_type or "").startswith("video"):
-        file_id   = msg.document.file_id
-        file_name = msg.document.file_name or "video.mp4"
-    if not file_id:
-        return
-
-    episode = extract_episode(msg.caption or file_name or "")
-    if not episode:
-        await msg.reply_text("⚠️ Episode number nahi mila! Caption: `01`, `7`, `12`")
-        return
-
-    anime  = setup["anime"]
-    season = setup["season"]
-
-    status = await msg.reply_text(
-        f"⏳ Processing...\n📺 `{anime}` › S{season} › {episode}"
-    )
-
+async def handle_download(request):
+    enc = request.match_info["enc"]
     try:
-        saved_msg = await userbot.forward_messages(
-            chat_id="me",
-            from_chat_id=msg.chat.id,
-            message_ids=msg.id
-        )
-        saved_fid = None
-        if saved_msg.video:
-            saved_fid = saved_msg.video.file_id
-        elif saved_msg.document:
-            saved_fid = saved_msg.document.file_id
+        file_id = decode(enc)
+    except:
+        return web.Response(text="Invalid", status=400)
+    return await do_stream(request, file_id, enc, download=True)
 
-        if saved_fid:
-            enc       = encode(saved_fid)
-            chat_id_s = saved_msg.chat.id
-            msg_id_s  = saved_msg.id
-        else:
-            raise Exception("saved file_id nahi mila")
+async def handle_clean(request):
+    enc = request.match_info["enc"]
+    if enc == "favicon.ico":
+        return web.Response(status=404)
+    try:
+        file_id = decode(enc)
+    except:
+        return web.Response(text="Invalid", status=400)
+    if request.method == "HEAD":
+        return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
+    return await do_stream(request, file_id, enc)
 
-    except Exception as e:
-        logging.error(f"Saved Messages error: {e}")
-        enc       = encode(file_id)
-        chat_id_s = msg.chat.id
-        msg_id_s  = msg.id
-
-    stream_link = f"{SERVER_URL}/{enc}"
-    ok = await firebase_save(anime, season, episode, stream_link, chat_id_s, msg_id_s)
-
-    await status.edit_text(
-        f"✅ **Done!**\n\n"
-        f"📺 `{anime}` › S{season} › {episode}\n\n"
-        f"🔗 `{stream_link}`\n\n"
-        f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
-    )
-
-async def start_userbot():
+async def main():
+    print("🔗 Userbot connect ho raha hai...")
     await userbot.start()
-    print("✅ Userbot ready!")
+    me = await userbot.get_me()
+    print(f"✅ Userbot ready: {me.first_name}")
+
+    app = web.Application(client_max_size=0)
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/watch/{enc}", handle_watch)
+    app.router.add_route("*", "/stream/{enc}", handle_stream)
+    app.router.add_get("/download/{enc}", handle_download)
+    app.router.add_route("*", "/{enc}", handle_clean)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"🌐 Server: http://0.0.0.0:{PORT}")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    print("🤖 Bot start!")
-    # Userbot ko bot ke saath start karo
-    bot.loop.run_until_complete(start_userbot())
-    bot.run()
+    asyncio.run(main())

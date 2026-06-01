@@ -13,6 +13,8 @@ STRING_SESSION = os.getenv("STRING_SESSION", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 PORT           = int(os.getenv("PORT", 8080))
 
+STORAGE_CHANNEL = -1003753814792  # Fixed storage channel ID
+
 userbot = Client(
     "streamer",
     api_id=API_ID,
@@ -21,42 +23,24 @@ userbot = Client(
     no_updates=True,
 )
 
-def decode(enc: str) -> str:
+def decode(enc: str) -> tuple[int, int]:
+    """base64 decode karke (chat_id, message_id) return karo"""
     pad = 4 - len(enc) % 4
     if pad != 4:
         enc += "=" * pad
-    return base64.urlsafe_b64decode(enc.encode()).decode()
+    raw = base64.urlsafe_b64decode(enc.encode()).decode()
+    chat_id, message_id = raw.split(":")
+    return int(chat_id), int(message_id)
 
-async def get_fresh_msg(enc: str):
-    """Firebase se chat_id/message_id lo aur fresh message lo"""
+async def get_message(enc: str):
+    """Directly storage channel se message lo — no Firebase lookup needed"""
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
-                if r.status != 200:
-                    return None
-                data = await r.json()
-        if not data:
-            return None
-        for anime, seasons in data.items():
-            if not isinstance(seasons, dict):
-                continue
-            for season, episodes in seasons.items():
-                if not isinstance(episodes, dict):
-                    continue
-                for ep, info in episodes.items():
-                    if not isinstance(info, dict):
-                        continue
-                    if enc not in info.get("link", ""):
-                        continue
-                    chat_id    = info.get("chat_id")
-                    message_id = info.get("message_id")
-                    if not chat_id or not message_id:
-                        return None
-                    msg = await userbot.get_messages(int(chat_id), int(message_id))
-                    return msg
+        chat_id, message_id = decode(enc)
+        msg = await userbot.get_messages(chat_id, message_id)
+        return msg
     except Exception as e:
-        print(f"get_fresh_msg error: {e}")
-    return None
+        print(f"get_message error: {e}")
+        return None
 
 PLAYER = """<!DOCTYPE html>
 <html><head>
@@ -84,15 +68,15 @@ async def do_stream(request, enc: str, download: bool = False):
             pass
 
     headers = {
-        "Content-Type": "video/mp4",
+        "Content-Type":  "video/mp4",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
     }
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    # Fresh message lo Firebase se
-    msg = await get_fresh_msg(enc)
+    # Storage channel se directly message lo
+    msg = await get_message(enc)
     if not msg or not msg.id:
         return web.Response(
             text="Video nahi mila — bot se dobara forward karo",
@@ -155,6 +139,7 @@ async def main():
     await userbot.start()
     me = await userbot.get_me()
     print(f"✅ Userbot: {me.first_name}")
+    print(f"📦 Storage Channel: {STORAGE_CHANNEL}")
 
     app = web.Application(client_max_size=0)
     app.router.add_get("/", handle_index)

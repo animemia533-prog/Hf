@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import logging
 import time
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -17,6 +17,7 @@ SERVER_URL     = os.getenv("SERVER_URL", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 STRING_SESSION = os.getenv("STRING_SESSION", "")
 
+# Userbot — Saved Messages ke liye
 userbot = Client(
     "userbot_helper",
     api_id=API_ID,
@@ -25,6 +26,7 @@ userbot = Client(
     no_updates=True,
 )
 
+# Bot
 bot = Client(
     "anime_bot",
     api_id=API_ID,
@@ -127,7 +129,6 @@ async def handle_video(client, msg: Message):
     )
 
     try:
-        # Userbot se Saved Messages mein copy karo
         saved_msg = await userbot.forward_messages(
             chat_id="me",
             from_chat_id=msg.chat.id,
@@ -143,7 +144,6 @@ async def handle_video(client, msg: Message):
             enc       = encode(saved_fid)
             chat_id_s = saved_msg.chat.id
             msg_id_s  = saved_msg.id
-            print(f"✅ Saved Messages mein copy hua: {msg_id_s}")
         else:
             raise Exception("saved file_id nahi mila")
 
@@ -163,12 +163,12 @@ async def handle_video(client, msg: Message):
         f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
     )
 
-async def main():
+async def start_userbot():
     await userbot.start()
     print("✅ Userbot ready!")
-    await bot.start()
-    print("🤖 Bot ready!")
-    await idle()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🤖 Bot start!")
+    # Userbot ko bot ke saath start karo
+    bot.loop.run_until_complete(start_userbot())
+    bot.run()

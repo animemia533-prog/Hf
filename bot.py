@@ -37,9 +37,16 @@ def extract_episode(text: str) -> str | None:
         return f"E{int(match.group(1)):02d}"
     return None
 
-async def firebase_save(anime, season, episode, stream_link) -> bool:
+async def firebase_save(anime, season, episode, stream_link, chat_id, message_id) -> bool:
     try:
-        payload = {"link": stream_link, "server": "Player1", "time": int(time.time())}
+        payload = {
+            "link": stream_link,
+            "server": "Player1",
+            "time": int(time.time()),
+            # Refresh ke liye chat_id aur message_id save karo
+            "chat_id": chat_id,
+            "message_id": message_id
+        }
         async with aiohttp.ClientSession() as session:
             async with session.put(
                 f"{FIREBASE_URL}/Animes/{anime}/S{season}/{episode}.json",
@@ -65,7 +72,7 @@ async def cmd_start(client, msg: Message):
 async def cmd_setup(client, msg: Message):
     parts = msg.text.split()
     if len(parts) != 3:
-        await msg.reply_text("❌ Format: `/setup anime-slug season`\nExample: `/setup naruto 1`")
+        await msg.reply_text("❌ Format: `/setup anime-slug season`")
         return
     try:
         season = int(parts[2])
@@ -104,33 +111,34 @@ async def handle_video(client, msg: Message):
     if not episode:
         await msg.reply_text(
             f"⚠️ Episode number nahi mila!\n"
-            f"Caption mein number hona chahiye: `01`, `7`, `12`"
+            f"Caption mein number: `01`, `7`, `12`"
         )
         return
 
-    anime  = setup["anime"]
-    season = setup["season"]
-    enc    = encode(file_id)
-
-    # Streaming link — seedha aapka server
+    anime   = setup["anime"]
+    season  = setup["season"]
+    enc     = encode(file_id)
     stream_link = f"{SERVER_URL}/{enc}"
 
-    # Firebase mein save karo
-    saved = await firebase_save(anime, season, episode, stream_link)
+    # chat_id aur message_id bhi save karo — refresh ke liye
+    saved = await firebase_save(
+        anime, season, episode, stream_link,
+        chat_id=msg.chat.id,
+        message_id=msg.id
+    )
 
     if saved:
         await msg.reply_text(
             f"✅ **Done!**\n\n"
             f"📺 `{anime}` › S{season} › {episode}\n\n"
-            f"🔗 Link:\n`{stream_link}`\n\n"
+            f"🔗 `{stream_link}`\n\n"
             f"💾 Firebase ✅"
         )
     else:
         await msg.reply_text(
-            f"⚠️ **Link bana par Firebase fail!**\n\n"
-            f"📺 `{anime}` › S{season} › {episode}\n\n"
-            f"🔗 Link:\n`{stream_link}`\n\n"
-            f"Manually save karo Firebase mein."
+            f"⚠️ Firebase fail!\n\n"
+            f"📺 `{anime}` › S{season} › {episode}\n"
+            f"🔗 `{stream_link}`"
         )
 
 if __name__ == "__main__":

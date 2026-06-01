@@ -6,13 +6,12 @@ from aiohttp import web
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 
-BOT_TOKEN       = os.getenv("BOT_TOKEN", "")
-API_ID          = int(os.getenv("API_ID", "0"))
-API_HASH        = os.getenv("API_HASH", "")
-STRING_SESSION  = os.getenv("STRING_SESSION", "")
-FIREBASE_URL    = os.getenv("FIREBASE_URL", "")
-STORAGE_CHANNEL = int(os.getenv("STORAGE_CHANNEL", "0"))
-PORT            = int(os.getenv("PORT", 8080))
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
+API_ID         = int(os.getenv("API_ID", "0"))
+API_HASH       = os.getenv("API_HASH", "")
+STRING_SESSION = os.getenv("STRING_SESSION", "")
+FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
+PORT           = int(os.getenv("PORT", 8080))
 
 userbot = Client(
     "streamer",
@@ -28,15 +27,8 @@ def decode(enc: str) -> str:
         enc += "=" * pad
     return base64.urlsafe_b64decode(enc.encode()).decode()
 
-# Cache — bar bar Firebase na jaaye
-_msg_cache: dict = {}
-
-async def get_msg(enc: str):
-    """Firebase se message_id lo, Storage Channel se fresh message lo"""
-    if enc in _msg_cache:
-        msg_id = _msg_cache[enc]
-        msg = await userbot.get_messages(STORAGE_CHANNEL, msg_id)
-        return msg
+async def get_fresh_msg(enc: str):
+    """Firebase se chat_id/message_id lo aur fresh message lo"""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
@@ -56,14 +48,14 @@ async def get_msg(enc: str):
                         continue
                     if enc not in info.get("link", ""):
                         continue
-                    msg_id = info.get("message_id")
-                    if not msg_id:
+                    chat_id    = info.get("chat_id")
+                    message_id = info.get("message_id")
+                    if not chat_id or not message_id:
                         return None
-                    _msg_cache[enc] = int(msg_id)
-                    msg = await userbot.get_messages(STORAGE_CHANNEL, int(msg_id))
+                    msg = await userbot.get_messages(int(chat_id), int(message_id))
                     return msg
     except Exception as e:
-        print(f"get_msg error: {e}")
+        print(f"get_fresh_msg error: {e}")
     return None
 
 PLAYER = """<!DOCTYPE html>
@@ -99,9 +91,13 @@ async def do_stream(request, enc: str, download: bool = False):
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    msg = await get_msg(enc)
+    # Fresh message lo Firebase se
+    msg = await get_fresh_msg(enc)
     if not msg or not msg.id:
-        return web.Response(text="Video nahi mila", status=404)
+        return web.Response(
+            text="Video nahi mila — bot se dobara forward karo",
+            status=404
+        )
 
     try:
         resp = web.StreamResponse(
@@ -122,10 +118,10 @@ async def do_stream(request, enc: str, download: bool = False):
 
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        return web.Response(text="Retry karo", status=503)
+        return web.Response(text="Server busy, retry karo", status=503)
     except Exception as e:
         print(f"Stream error: {e}")
-        return web.Response(text="Error", status=500)
+        return web.Response(text="Stream error", status=500)
 
 async def handle_index(request):
     return web.Response(
@@ -159,7 +155,6 @@ async def main():
     await userbot.start()
     me = await userbot.get_me()
     print(f"✅ Userbot: {me.first_name}")
-    print(f"📦 Storage Channel: {STORAGE_CHANNEL}")
 
     app = web.Application(client_max_size=0)
     app.router.add_get("/", handle_index)

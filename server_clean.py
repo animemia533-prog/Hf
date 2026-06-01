@@ -3,7 +3,7 @@ import base64
 import asyncio
 from aiohttp import web
 from pyrogram import Client
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, FileReferenceExpired, FileReferenceEmpty
 
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 API_ID         = int(os.getenv("API_ID", "0"))
@@ -11,13 +11,13 @@ API_HASH       = os.getenv("API_HASH", "")
 STRING_SESSION = os.getenv("STRING_SESSION", "")
 PORT           = int(os.getenv("PORT", 8080))
 
-# Userbot — string session se (fast, no size limit)
+# Userbot — string session
 userbot = Client(
     "userbot",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=STRING_SESSION,
-    no_updates=True,  # Updates ki zaroorat nahi server ko
+    no_updates=True,
 )
 
 def decode(enc: str) -> str:
@@ -44,7 +44,6 @@ video{{width:100%;max-height:100vh}}
 async def stream_file(request, file_id: str, download: bool = False):
     range_header = request.headers.get("Range", "")
     offset = 0
-
     if range_header.startswith("bytes="):
         try:
             start = int(range_header[6:].split("-")[0])
@@ -72,6 +71,13 @@ async def stream_file(request, file_id: str, download: bool = False):
                 await response.write(chunk)
             except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
                 break
+    except (FileReferenceExpired, FileReferenceEmpty):
+        # File reference expire — user ko batao
+        print(f"File reference expired: {file_id[:20]}...")
+        try:
+            await response.write(b"")  # empty response
+        except:
+            pass
     except FloodWait as e:
         print(f"FloodWait: {e.value}s")
         await asyncio.sleep(e.value)

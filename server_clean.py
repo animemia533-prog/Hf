@@ -6,14 +6,13 @@ from aiohttp import web
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 
-BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
-API_ID         = int(os.getenv("API_ID", "0"))
-API_HASH       = os.getenv("API_HASH", "")
-STRING_SESSION = os.getenv("STRING_SESSION", "")
-FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
-PORT           = int(os.getenv("PORT", 8080))
-
-STORAGE_CHANNEL = -1003753814792  # Fixed storage channel ID
+BOT_TOKEN       = os.getenv("BOT_TOKEN", "")
+API_ID          = int(os.getenv("API_ID", "0"))
+API_HASH        = os.getenv("API_HASH", "")
+STRING_SESSION  = os.getenv("STRING_SESSION", "")
+FIREBASE_URL    = os.getenv("FIREBASE_URL", "")
+STORAGE_CHANNEL = int(os.getenv("STORAGE_CHANNEL", "0"))
+PORT            = int(os.getenv("PORT", 8080))
 
 userbot = Client(
     "streamer",
@@ -23,24 +22,49 @@ userbot = Client(
     no_updates=True,
 )
 
-def decode(enc: str) -> tuple[int, int]:
-    """base64 decode karke (chat_id, message_id) return karo"""
+def decode(enc: str) -> str:
     pad = 4 - len(enc) % 4
     if pad != 4:
         enc += "=" * pad
-    raw = base64.urlsafe_b64decode(enc.encode()).decode()
-    chat_id, message_id = raw.split(":")
-    return int(chat_id), int(message_id)
+    return base64.urlsafe_b64decode(enc.encode()).decode()
 
-async def get_message(enc: str):
-    """Directly storage channel se message lo — no Firebase lookup needed"""
-    try:
-        chat_id, message_id = decode(enc)
-        msg = await userbot.get_messages(chat_id, message_id)
+# Cache — bar bar Firebase na jaaye
+_msg_cache: dict = {}
+
+async def get_msg(enc: str):
+    """Firebase se message_id lo, Storage Channel se fresh message lo"""
+    if enc in _msg_cache:
+        msg_id = _msg_cache[enc]
+        msg = await userbot.get_messages(STORAGE_CHANNEL, msg_id)
         return msg
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
+                if r.status != 200:
+                    return None
+                data = await r.json()
+        if not data:
+            return None
+        for anime, seasons in data.items():
+            if not isinstance(seasons, dict):
+                continue
+            for season, episodes in seasons.items():
+                if not isinstance(episodes, dict):
+                    continue
+                for ep, info in episodes.items():
+                    if not isinstance(info, dict):
+                        continue
+                    if enc not in info.get("link", ""):
+                        continue
+                    msg_id = info.get("message_id")
+                    if not msg_id:
+                        return None
+                    _msg_cache[enc] = int(msg_id)
+                    msg = await userbot.get_messages(STORAGE_CHANNEL, int(msg_id))
+                    return msg
     except Exception as e:
-        print(f"get_message error: {e}")
-        return None
+        print(f"get_msg error: {e}")
+    return None
 
 PLAYER = """<!DOCTYPE html>
 <html><head>
@@ -68,20 +92,16 @@ async def do_stream(request, enc: str, download: bool = False):
             pass
 
     headers = {
-        "Content-Type":  "video/mp4",
+        "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
     }
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    # Storage channel se directly message lo
-    msg = await get_message(enc)
+    msg = await get_msg(enc)
     if not msg or not msg.id:
-        return web.Response(
-            text="Video nahi mila — bot se dobara forward karo",
-            status=404
-        )
+        return web.Response(text="Video nahi mila", status=404)
 
     try:
         resp = web.StreamResponse(
@@ -102,10 +122,10 @@ async def do_stream(request, enc: str, download: bool = False):
 
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        return web.Response(text="Server busy, retry karo", status=503)
+        return web.Response(text="Retry karo", status=503)
     except Exception as e:
         print(f"Stream error: {e}")
-        return web.Response(text="Stream error", status=500)
+        return web.Response(text="Error", status=500)
 
 async def handle_index(request):
     return web.Response(

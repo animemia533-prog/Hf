@@ -15,7 +15,7 @@ API_ID           = int(os.getenv("API_ID", "0"))
 API_HASH         = os.getenv("API_HASH", "")
 SERVER_URL       = os.getenv("SERVER_URL", "")
 FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
-STORAGE_CHANNEL  = int(os.getenv("STORAGE_CHANNEL_ID", "0"))   # Storage channel ID (negative number)
+STORAGE_CHANNEL  = int(os.getenv("STORAGE_CHANNEL_ID", "0"))  # Railway env se aayega
 
 bot = Client(
     "anime_bot",

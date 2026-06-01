@@ -17,16 +17,16 @@ SERVER_URL     = os.getenv("SERVER_URL", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 STRING_SESSION = os.getenv("STRING_SESSION", "")
 
-# Userbot — Saved Messages mein copy ke liye
+# Userbot — Saved Messages ke liye
 userbot = Client(
-    "userbot_copy",
+    "userbot_helper",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=STRING_SESSION,
     no_updates=True,
 )
 
-# Bot — messages receive karne ke liye
+# Bot — messages ke liye
 bot = Client(
     "anime_bot",
     api_id=API_ID,
@@ -57,8 +57,8 @@ async def firebase_save(anime, season, episode, stream_link, chat_id, message_id
             "chat_id": chat_id,
             "message_id": message_id
         }
-        async with aiohttp.ClientSession() as s:
-            async with s.put(
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
                 f"{FIREBASE_URL}/Animes/{anime}/S{season}/{episode}.json",
                 json=payload
             ) as r:
@@ -73,7 +73,8 @@ async def cmd_start(client, msg: Message):
         "🎬 **Anime Upload Bot**\n\n"
         "`/setup anime-slug season`\n"
         "Example: `/setup naruto 1`\n\n"
-        "Videos forward karo — caption mein number: `01`, `7`, `12`"
+        "Phir videos forward karo!\n"
+        "Caption mein episode number: `01`, `7`, `12`"
     )
 
 @bot.on_message(filters.command("setup"))
@@ -88,7 +89,7 @@ async def cmd_setup(client, msg: Message):
         await msg.reply_text("❌ Season number chahiye!")
         return
     user_setup[msg.from_user.id] = {"anime": parts[1].lower(), "season": season}
-    await msg.reply_text(f"✅ `{parts[1]}` › S{season} — Ab forward karo!")
+    await msg.reply_text(f"✅ `{parts[1]}` › S{season} — Forward karo!")
 
 @bot.on_message(filters.command("status"))
 async def cmd_status(client, msg: Message):
@@ -117,48 +118,45 @@ async def handle_video(client, msg: Message):
 
     episode = extract_episode(msg.caption or file_name or "")
     if not episode:
-        await msg.reply_text("⚠️ Episode number nahi mila! Caption mein `01`, `7`, `12` likho")
+        await msg.reply_text("⚠️ Episode number nahi mila! Caption: `01`, `7`, `12`")
         return
 
     anime  = setup["anime"]
     season = setup["season"]
 
     status = await msg.reply_text(
-        f"⏳ Saved Messages mein copy ho raha hai...\n"
-        f"📺 `{anime}` › S{season} › {episode}"
+        f"⏳ Processing...\n📺 `{anime}` › S{season} › {episode}"
     )
 
     try:
-        # Userbot se Saved Messages mein forward karo
-        saved = await userbot.forward_messages(
+        # Userbot se Saved Messages mein copy karo
+        saved_msg = await userbot.forward_messages(
             chat_id="me",
             from_chat_id=msg.chat.id,
             message_ids=msg.id
         )
-
         saved_file_id = None
-        if saved.video:
-            saved_file_id = saved.video.file_id
-        elif saved.document:
-            saved_file_id = saved.document.file_id
+        if saved_msg.video:
+            saved_file_id = saved_msg.video.file_id
+        elif saved_msg.document:
+            saved_file_id = saved_msg.document.file_id
 
         if saved_file_id:
-            enc         = encode(saved_file_id)
-            stream_link = f"{SERVER_URL}/{enc}"
-            s_chat_id   = saved.chat.id
-            s_msg_id    = saved.id
+            enc        = encode(saved_file_id)
+            chat_id_s  = saved_msg.chat.id
+            msg_id_s   = saved_msg.id
         else:
             raise Exception("file_id nahi mila")
 
     except Exception as e:
-        logging.error(f"Saved Messages forward error: {e}")
-        # Fallback — original use karo
-        enc         = encode(file_id)
-        stream_link = f"{SERVER_URL}/{enc}"
-        s_chat_id   = msg.chat.id
-        s_msg_id    = msg.id
+        logging.error(f"Saved Messages error: {e}")
+        # Fallback
+        enc       = encode(file_id)
+        chat_id_s = msg.chat.id
+        msg_id_s  = msg.id
 
-    ok = await firebase_save(anime, season, episode, stream_link, s_chat_id, s_msg_id)
+    stream_link = f"{SERVER_URL}/{enc}"
+    ok = await firebase_save(anime, season, episode, stream_link, chat_id_s, msg_id_s)
 
     await status.edit_text(
         f"✅ **Done!**\n\n"
@@ -167,19 +165,11 @@ async def handle_video(client, msg: Message):
         f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
     )
 
-async def main():
-    # Dono clients ek hi loop mein start karo
-    await userbot.start()
-    print("✅ Userbot ready!")
-
-    await bot.start()
-    print("🤖 Bot start!")
-
-    # Dono ko tab tak chalate raho jab tak manually band na ho
-    await asyncio.gather(
-        userbot.idle(),
-        bot.idle(),
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🤖 Bot + Userbot start!")
+    # Userbot pehle start karo
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(userbot.start())
+    print("✅ Userbot ready!")
+    # Bot run karo
+    bot.run()

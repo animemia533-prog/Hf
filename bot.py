@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import logging
 import time
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -17,7 +17,6 @@ SERVER_URL     = os.getenv("SERVER_URL", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 STRING_SESSION = os.getenv("STRING_SESSION", "")
 
-# Userbot — Saved Messages ke liye
 userbot = Client(
     "userbot_helper",
     api_id=API_ID,
@@ -26,7 +25,6 @@ userbot = Client(
     no_updates=True,
 )
 
-# Bot — messages ke liye
 bot = Client(
     "anime_bot",
     api_id=API_ID,
@@ -135,22 +133,22 @@ async def handle_video(client, msg: Message):
             from_chat_id=msg.chat.id,
             message_ids=msg.id
         )
-        saved_file_id = None
+        saved_fid = None
         if saved_msg.video:
-            saved_file_id = saved_msg.video.file_id
+            saved_fid = saved_msg.video.file_id
         elif saved_msg.document:
-            saved_file_id = saved_msg.document.file_id
+            saved_fid = saved_msg.document.file_id
 
-        if saved_file_id:
-            enc        = encode(saved_file_id)
-            chat_id_s  = saved_msg.chat.id
-            msg_id_s   = saved_msg.id
+        if saved_fid:
+            enc       = encode(saved_fid)
+            chat_id_s = saved_msg.chat.id
+            msg_id_s  = saved_msg.id
+            print(f"✅ Saved Messages mein copy hua: {msg_id_s}")
         else:
-            raise Exception("file_id nahi mila")
+            raise Exception("saved file_id nahi mila")
 
     except Exception as e:
         logging.error(f"Saved Messages error: {e}")
-        # Fallback
         enc       = encode(file_id)
         chat_id_s = msg.chat.id
         msg_id_s  = msg.id
@@ -165,11 +163,12 @@ async def handle_video(client, msg: Message):
         f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
     )
 
-if __name__ == "__main__":
-    print("🤖 Bot + Userbot start!")
-    # Userbot pehle start karo
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(userbot.start())
+async def main():
+    await userbot.start()
     print("✅ Userbot ready!")
-    # Bot run karo
-    bot.run()
+    await bot.start()
+    print("🤖 Bot ready!")
+    await idle()
+
+if __name__ == "__main__":
+    asyncio.run(main())

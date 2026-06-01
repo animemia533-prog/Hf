@@ -13,7 +13,6 @@ STRING_SESSION = os.getenv("STRING_SESSION", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 PORT           = int(os.getenv("PORT", 8080))
 
-# Userbot — Saved Messages se stream karega
 userbot = Client(
     "streamer",
     api_id=API_ID,
@@ -28,11 +27,8 @@ def decode(enc: str) -> str:
         enc += "=" * pad
     return base64.urlsafe_b64decode(enc.encode()).decode()
 
-def encode(file_id: str) -> str:
-    return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
-
-async def refresh_from_firebase(enc: str) -> str | None:
-    """Firebase se message fetch karke fresh file_id lo"""
+async def get_message_from_firebase(enc: str):
+    """Firebase se chat_id + message_id lo, fresh message fetch karo"""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
@@ -41,7 +37,6 @@ async def refresh_from_firebase(enc: str) -> str | None:
                 data = await r.json()
         if not data:
             return None
-
         for anime, seasons in data.items():
             if not isinstance(seasons, dict):
                 continue
@@ -57,27 +52,11 @@ async def refresh_from_firebase(enc: str) -> str | None:
                     message_id = info.get("message_id")
                     if not chat_id or not message_id:
                         return None
+                    # Fresh message object lo
                     msg = await userbot.get_messages(int(chat_id), int(message_id))
-                    if not msg:
-                        return None
-                    new_fid = None
-                    if msg.video:
-                        new_fid = msg.video.file_id
-                    elif msg.document:
-                        new_fid = msg.document.file_id
-                    if new_fid:
-                        # Firebase update
-                        new_enc  = encode(new_fid)
-                        new_link = info["link"].rsplit("/", 1)[0] + "/" + new_enc
-                        async with aiohttp.ClientSession() as s:
-                            await s.patch(
-                                f"{FIREBASE_URL}/Animes/{anime}/{season}/{ep}.json",
-                                json={"link": new_link}
-                            )
-                        print(f"✅ Refreshed: {anime}/{season}/{ep}")
-                        return new_fid
+                    return msg
     except Exception as e:
-        print(f"Refresh error: {e}")
+        print(f"Firebase lookup error: {e}")
     return None
 
 PLAYER = """<!DOCTYPE html>
@@ -95,7 +74,7 @@ video{{width:100%;max-height:100vh}}
 </video>
 </body></html>"""
 
-async def do_stream(request, file_id: str, enc: str, download: bool = False):
+async def do_stream(request, enc: str, download: bool = False):
     range_header = request.headers.get("Range", "")
     offset = 0
     if range_header.startswith("bytes="):
@@ -113,52 +92,42 @@ async def do_stream(request, file_id: str, enc: str, download: bool = False):
     if download:
         headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    for attempt in range(2):
-        try:
-            resp = web.StreamResponse(
-                status=206 if range_header else 200,
-                headers=headers
-            )
-            await resp.prepare(request)
+    # Firebase se fresh message lo
+    msg = await get_message_from_firebase(enc)
+    if not msg:
+        return web.Response(
+            text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:#ff4444'>❌ Video nahi mila!<br><small>Bot se dobara forward karo</small></h3>",
+            content_type="text/html",
+            status=404
+        )
 
-            async for chunk in userbot.stream_media(file_id, offset=offset):
-                try:
-                    await resp.write(chunk)
-                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-                    try: await resp.write_eof()
-                    except: pass
-                    return resp
+    try:
+        resp = web.StreamResponse(
+            status=206 if range_header else 200,
+            headers=headers
+        )
+        await resp.prepare(request)
 
-            try: await resp.write_eof()
-            except: pass
-            return resp
+        # Message object se seedha stream karo — file_id nahi
+        async for chunk in userbot.stream_media(msg, offset=offset):
+            try:
+                await resp.write(chunk)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                break
 
-        except (FileReferenceExpired, FileReferenceEmpty):
-            if attempt == 0:
-                print(f"⚠️ Expired — refreshing...")
-                new_fid = await refresh_from_firebase(enc)
-                if new_fid:
-                    file_id = new_fid
-                    continue
-            # Refresh nahi hua
-            return web.Response(
-                text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:#ff4444'>❌ Link expire ho gaya!<br><small>Bot se dobara forward karo</small></h3>",
-                content_type="text/html",
-                status=410
-            )
+        try: await resp.write_eof()
+        except: pass
+        return resp
 
-        except FloodWait as e:
-            print(f"FloodWait: {e.value}s")
-            await asyncio.sleep(e.value)
-            break
-
-        except Exception as e:
-            err = str(e)
-            if "closing transport" not in err and "Connection" not in err:
-                print(f"Error: {err}")
-            break
-
-    return web.Response(text="Error", status=500)
+    except FloodWait as e:
+        print(f"FloodWait: {e.value}s")
+        await asyncio.sleep(e.value)
+        return web.Response(text="Try again", status=503)
+    except Exception as e:
+        err = str(e)
+        if "closing transport" not in err and "Connection" not in err:
+            print(f"Stream error: {err}")
+        return web.Response(text="Error", status=500)
 
 async def handle_index(request):
     return web.Response(
@@ -172,33 +141,21 @@ async def handle_watch(request):
 
 async def handle_stream(request):
     enc = request.match_info["enc"]
-    try:
-        file_id = decode(enc)
-    except:
-        return web.Response(text="Invalid", status=400)
     if request.method == "HEAD":
         return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
-    return await do_stream(request, file_id, enc)
+    return await do_stream(request, enc)
 
 async def handle_download(request):
     enc = request.match_info["enc"]
-    try:
-        file_id = decode(enc)
-    except:
-        return web.Response(text="Invalid", status=400)
-    return await do_stream(request, file_id, enc, download=True)
+    return await do_stream(request, enc, download=True)
 
 async def handle_clean(request):
     enc = request.match_info["enc"]
     if enc == "favicon.ico":
         return web.Response(status=404)
-    try:
-        file_id = decode(enc)
-    except:
-        return web.Response(text="Invalid", status=400)
     if request.method == "HEAD":
         return web.Response(headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"})
-    return await do_stream(request, file_id, enc)
+    return await do_stream(request, enc)
 
 async def main():
     print("🔗 Userbot connect ho raha hai...")

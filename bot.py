@@ -10,23 +10,12 @@ from pyrogram.types import Message
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
-API_ID         = int(os.getenv("API_ID", "0"))
-API_HASH       = os.getenv("API_HASH", "")
-SERVER_URL     = os.getenv("SERVER_URL", "")
-FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
-STRING_SESSION = os.getenv("STRING_SESSION", "")
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
+API_ID       = int(os.getenv("API_ID", "0"))
+API_HASH     = os.getenv("API_HASH", "")
+SERVER_URL   = os.getenv("SERVER_URL", "")
+FIREBASE_URL = os.getenv("FIREBASE_URL", "")
 
-# Userbot — Saved Messages ke liye
-userbot = Client(
-    "userbot_helper",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=STRING_SESSION,
-    no_updates=True,
-)
-
-# Bot
 bot = Client(
     "anime_bot",
     api_id=API_ID,
@@ -54,8 +43,8 @@ async def firebase_save(anime, season, episode, stream_link, chat_id, message_id
             "link": stream_link,
             "server": "Player1",
             "time": int(time.time()),
-            "chat_id": chat_id,
-            "message_id": message_id
+            "chat_id": str(chat_id),
+            "message_id": str(message_id)
         }
         async with aiohttp.ClientSession() as session:
             async with session.put(
@@ -123,52 +112,24 @@ async def handle_video(client, msg: Message):
 
     anime  = setup["anime"]
     season = setup["season"]
+    enc    = encode(file_id)
+    stream_link = f"{SERVER_URL}/{enc}"
 
-    status = await msg.reply_text(
-        f"⏳ Processing...\n📺 `{anime}` › S{season} › {episode}"
+    # chat_id aur message_id save karo refresh ke liye
+    ok = await firebase_save(
+        anime, season, episode,
+        stream_link,
+        msg.chat.id,
+        msg.id
     )
 
-    try:
-        saved_msg = await userbot.forward_messages(
-            chat_id="me",
-            from_chat_id=msg.chat.id,
-            message_ids=msg.id
-        )
-        saved_fid = None
-        if saved_msg.video:
-            saved_fid = saved_msg.video.file_id
-        elif saved_msg.document:
-            saved_fid = saved_msg.document.file_id
-
-        if saved_fid:
-            enc       = encode(saved_fid)
-            chat_id_s = saved_msg.chat.id
-            msg_id_s  = saved_msg.id
-        else:
-            raise Exception("saved file_id nahi mila")
-
-    except Exception as e:
-        logging.error(f"Saved Messages error: {e}")
-        enc       = encode(file_id)
-        chat_id_s = msg.chat.id
-        msg_id_s  = msg.id
-
-    stream_link = f"{SERVER_URL}/{enc}"
-    ok = await firebase_save(anime, season, episode, stream_link, chat_id_s, msg_id_s)
-
-    await status.edit_text(
+    await msg.reply_text(
         f"✅ **Done!**\n\n"
         f"📺 `{anime}` › S{season} › {episode}\n\n"
         f"🔗 `{stream_link}`\n\n"
         f"{'💾 Firebase ✅' if ok else '⚠️ Firebase fail!'}"
     )
 
-async def start_userbot():
-    await userbot.start()
-    print("✅ Userbot ready!")
-
 if __name__ == "__main__":
     print("🤖 Bot start!")
-    # Userbot ko bot ke saath start karo
-    bot.loop.run_until_complete(start_userbot())
     bot.run()

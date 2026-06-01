@@ -13,8 +13,9 @@ STRING_SESSION = os.getenv("STRING_SESSION", "")
 FIREBASE_URL   = os.getenv("FIREBASE_URL", "")
 PORT           = int(os.getenv("PORT", 8080))
 
+# Userbot — Saved Messages se stream karega
 userbot = Client(
-    "userbot",
+    "streamer",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=STRING_SESSION,
@@ -30,13 +31,8 @@ def decode(enc: str) -> str:
 def encode(file_id: str) -> str:
     return base64.urlsafe_b64encode(file_id.encode()).decode().rstrip("=")
 
-# Cache — ek baar refresh hua toh dobara mat karo
-_refreshed: dict = {}
-
-async def get_fresh_file_id(enc: str) -> str | None:
+async def refresh_from_firebase(enc: str) -> str | None:
     """Firebase se message fetch karke fresh file_id lo"""
-    if enc in _refreshed:
-        return _refreshed[enc]
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(f"{FIREBASE_URL}/Animes.json") as r:
@@ -57,25 +53,19 @@ async def get_fresh_file_id(enc: str) -> str | None:
                         continue
                     if enc not in info.get("link", ""):
                         continue
-
                     chat_id    = info.get("chat_id")
                     message_id = info.get("message_id")
                     if not chat_id or not message_id:
-                        print(f"❌ {anime}/{season}/{ep} mein chat_id/message_id nahi — dobara forward karo")
                         return None
-
                     msg = await userbot.get_messages(int(chat_id), int(message_id))
                     if not msg:
                         return None
-
                     new_fid = None
                     if msg.video:
                         new_fid = msg.video.file_id
                     elif msg.document:
                         new_fid = msg.document.file_id
-
                     if new_fid:
-                        _refreshed[enc] = new_fid
                         # Firebase update
                         new_enc  = encode(new_fid)
                         new_link = info["link"].rsplit("/", 1)[0] + "/" + new_enc
@@ -84,7 +74,7 @@ async def get_fresh_file_id(enc: str) -> str | None:
                                 f"{FIREBASE_URL}/Animes/{anime}/{season}/{ep}.json",
                                 json={"link": new_link}
                             )
-                        print(f"✅ Auto refreshed: {anime}/{season}/{ep}")
+                        print(f"✅ Refreshed: {anime}/{season}/{ep}")
                         return new_fid
     except Exception as e:
         print(f"Refresh error: {e}")
@@ -115,54 +105,47 @@ async def do_stream(request, file_id: str, enc: str, download: bool = False):
         except:
             pass
 
-    resp_headers = {
+    headers = {
         "Content-Type": "video/mp4",
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
     }
     if download:
-        resp_headers["Content-Disposition"] = "attachment; filename=video.mp4"
+        headers["Content-Disposition"] = "attachment; filename=video.mp4"
 
-    # Try stream karo
     for attempt in range(2):
         try:
-            response = web.StreamResponse(
+            resp = web.StreamResponse(
                 status=206 if range_header else 200,
-                headers=resp_headers
+                headers=headers
             )
-            await response.prepare(request)
+            await resp.prepare(request)
 
             async for chunk in userbot.stream_media(file_id, offset=offset):
                 try:
-                    await response.write(chunk)
+                    await resp.write(chunk)
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-                    try:
-                        await response.write_eof()
-                    except:
-                        pass
-                    return response
+                    try: await resp.write_eof()
+                    except: pass
+                    return resp
 
-            try:
-                await response.write_eof()
-            except:
-                pass
-            return response
+            try: await resp.write_eof()
+            except: pass
+            return resp
 
         except (FileReferenceExpired, FileReferenceEmpty):
             if attempt == 0:
-                print(f"⚠️ File expired, refreshing...")
-                new_fid = await get_fresh_file_id(enc)
+                print(f"⚠️ Expired — refreshing...")
+                new_fid = await refresh_from_firebase(enc)
                 if new_fid:
                     file_id = new_fid
-                    continue  # Retry with new file_id
-                else:
-                    # chat_id nahi — error page
-                    return web.Response(
-                        text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:red'>❌ Link expire ho gaya!<br><small>Bot se naya link generate karo</small></h3>",
-                        content_type="text/html",
-                        status=410
-                    )
-            break
+                    continue
+            # Refresh nahi hua
+            return web.Response(
+                text="<h3 style='font-family:sans-serif;text-align:center;margin-top:40vh;color:#ff4444'>❌ Link expire ho gaya!<br><small>Bot se dobara forward karo</small></h3>",
+                content_type="text/html",
+                status=410
+            )
 
         except FloodWait as e:
             print(f"FloodWait: {e.value}s")
@@ -172,10 +155,10 @@ async def do_stream(request, file_id: str, enc: str, download: bool = False):
         except Exception as e:
             err = str(e)
             if "closing transport" not in err and "Connection" not in err:
-                print(f"Stream error: {err}")
+                print(f"Error: {err}")
             break
 
-    return web.Response(text="Stream error", status=500)
+    return web.Response(text="Error", status=500)
 
 async def handle_index(request):
     return web.Response(
@@ -234,7 +217,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"🌐 Server ready: http://0.0.0.0:{PORT}")
+    print(f"🌐 Server: http://0.0.0.0:{PORT}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

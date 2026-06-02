@@ -1,270 +1,400 @@
-import os
-import hashlib
-import logging
-import urllib.parse
-import asyncio
-import math
-from contextlib import asynccontextmanager
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, HTMLResponse
-from pyrogram import Client
-from pyrogram.errors import FloodWait
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+AnimeVerse Upload Bot — Caption Auto-Detect Mode
+=================================================
+Install:  pip install pyTelegramBotAPI firebase-admin
+Run:      python bot.py
 
-BOT_TOKEN        = os.getenv("BOT_TOKEN", "")
-API_ID           = int(os.getenv("API_ID", "0"))
-API_HASH         = os.getenv("API_HASH", "")
-STORAGE_CHANNEL  = int(os.getenv("STORAGE_CHANNEL", "0"))
-SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
-BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
-PORT             = int(os.getenv("PORT", 8000))
-ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
+Flow:
+  1. /setup anime-id S1   → anime aur season set karo (ek baar)
+  2. Saari files ek saath forward karo (kisi bhi order mein)
+  3. Bot caption se Episode + Quality auto-detect karega
+  4. Same episode ki files group → Storage → Firebase save
+  5. /done → sab complete hone pe confirm karo
+"""
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+import re
+import telebot
+import firebase_admin
+from firebase_admin import credentials, db
 
-pyro: Client = None
+# ══════════════════════════════════════════════════════
+#   SETTINGS — Sirf yahan apna data daalo
+# ══════════════════════════════════════════════════════
 
+BOT_TOKEN       = "8906093291:AAFnAaJwAYTJiTExqHn2N-aqEbtneR_sByo"
+BOT_USERNAME    = "D0file_Bot"         # @ke bina
+ALLOWED_USER    = 7373324949
 
-def is_allowed(user_id):
-    if not ALLOWED_USERS.strip():
-        return True
-    return str(user_id) in [u.strip() for u in ALLOWED_USERS.split(",")]
+STORAGE_CHANNEL = -1003963251495
+FIREBASE_URL    = "https://animeverse-9eada-default-rtdb.firebaseio.com/"
+FIREBASE_CRED   = "key.json"
 
+# Kitni qualities per episode? (3 = 480p+720p+1080p)
+# Jab yeh count pura ho → auto save
+QUALITIES_PER_EP = 3
 
-def generate_code(msg_id, filename):
-    raw = f"{SECRET_KEY}:{msg_id}:{filename}"
-    return hashlib.md5(raw.encode()).hexdigest()[:24]
+# ══════════════════════════════════════════════════════
+#   INIT
+# ══════════════════════════════════════════════════════
 
+cred = credentials.Certificate(FIREBASE_CRED)
+firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})
 
-def make_stream_link(msg_id, filename):
-    safe = urllib.parse.quote(filename)
-    code = generate_code(msg_id, filename)
-    return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}"
+bot = telebot.TeleBot(BOT_TOKEN)
 
+_cid = str(STORAGE_CHANNEL).replace("-100", "")
+# Delivery link format: https://t.me/BOT_USERNAME?start=MSG_ID
 
-def verify_code(msg_id, filename, code):
-    return generate_code(msg_id, filename) == code
+# ══════════════════════════════════════════════════════
+#   STATE
+# ══════════════════════════════════════════════════════
 
+session = {
+    "anime_id" : None,
+    "season"   : None,
+    "done_eps" : 0,
+}
 
-# ── BOT HANDLERS ──────────────────────────────────────
+# ep_buffer[ep_num] = [ {chat_id, msg_id, size, quality}, ... ]
+ep_buffer = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-    await update.message.reply_text(
-        "👋 *Video Storage Bot*\n\n"
-        "Koi bhi video/document bhejo — main use private channel mein save kar ke "
-        "aapko ek *streaming link* deta hoon.\n\nBas file bhejo! 🚀",
-        parse_mode="Markdown",
-    )
+def reset_all():
+    session.update({"anime_id": None, "season": None, "done_eps": 0})
+    ep_buffer.clear()
 
+# ══════════════════════════════════════════════════════
+#   CAPTION PARSER
+# ══════════════════════════════════════════════════════
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    msg = update.message
-    file_obj, filename = None, "video"
+def parse_caption(text: str):
+    """
+    Caption/filename se sirf pehla number nikaalega — koi keyword zaroori nahi.
 
-    if msg.video:
-        file_obj = msg.video
-        filename = msg.video.file_name or f"video_{msg.video.file_unique_id}.mp4"
-    elif msg.document:
-        file_obj = msg.document
-        filename = msg.document.file_name or f"doc_{msg.document.file_unique_id}"
-    elif msg.audio:
-        file_obj = msg.audio
-        filename = msg.audio.file_name or f"audio_{msg.audio.file_unique_id}.mp3"
-    elif msg.video_note:
-        file_obj = msg.video_note
-        filename = f"videonote_{msg.video_note.file_unique_id}.mp4"
+    Examples:
+      "07"               → 7
+      "Naruto 05 720p"   → 5
+      "102 [1080p]"      → 102
+      "S2 11 480p"       → 11  (S2 aur 480 skip)
+      "2"                → 2
+
+    Returns: (ep_num: int or None, quality: str or None)
+    """
+    if not text:
+        return None, None
+
+    t = text.upper()
+
+    # --- Quality pehle nikaal do taaki wo episode number na bane ---
+    quality = None
+    q_match = re.search(r'\b(1080P?|720P?|480P?)\b', t)
+    if q_match:
+        quality = q_match.group(1)
+        if not quality.endswith("P"):
+            quality += "P"
+        quality = quality.replace("P", "p")   # → "720p"
+        t = t[:q_match.start()] + t[q_match.end():]
+
+    # --- Season number hata do (S1, S2 ... S99) ---
+    t = re.sub(r'\bS\d{1,2}\b', '', t)
+
+    # --- Pehla standalone number lo (1 se 3 digit) ---
+    ep_num = None
+    nums = re.findall(r'\b(\d{1,3})\b', t)
+    if nums:
+        ep_num = int(nums[0])
+
+    return ep_num, quality
+
+# ══════════════════════════════════════════════════════
+#   FIREBASE
+# ══════════════════════════════════════════════════════
+
+def save_to_firebase(anime_id, season, ep_num, quality_dict):
+    ep_key = f"E{ep_num}"
+    if not quality_dict:
+        print(f"  ⚠️ Empty dict — skip Firebase for {ep_key}")
+        return ep_key
+    db.reference(f"anime_links/{anime_id}/{season}/{ep_key}").update(quality_dict)
+    print(f"  ✅ Firebase: anime_links/{anime_id}/{season}/{ep_key}")
+    return ep_key
+
+# ══════════════════════════════════════════════════════
+#   STORAGE FORWARD
+# ══════════════════════════════════════════════════════
+
+def forward_to_storage(from_chat_id, msg_id, new_caption):
+    try:
+        sent = bot.copy_message(
+            chat_id      = STORAGE_CHANNEL,
+            from_chat_id = from_chat_id,
+            message_id   = msg_id,
+            caption      = new_caption,
+        )
+        # Link format: https://t.me/BotUsername?start=MSG_ID
+        return f"https://t.me/{BOT_USERNAME}?start={sent.message_id}"
+    except Exception as e:
+        print(f"  ❌ Forward error: {e}")
+        return None
+
+# ══════════════════════════════════════════════════════
+#   PROCESS EPISODE
+# ══════════════════════════════════════════════════════
+
+def process_ep(chat_id, ep_num, files):
+    anime_id = session["anime_id"]
+    season   = session["season"]
+    ep_key   = f"E{ep_num}"
+
+    # Size ke hisaab se sort — chota=480p, beech=720p, bada=1080p
+    sorted_files = sorted(files, key=lambda x: x["size"])
+    quality_map = {0: "480p", 1: "720p", 2: "1080p"}
+    for i, f in enumerate(sorted_files):
+        f["quality"] = quality_map.get(i, f"part{i+1}")
+
+    quality_dict = {}
+    for f in files:
+        quality = f["quality"]
+        size_mb = round(f["size"] / (1024 * 1024), 1)
+
+        caption = (
+            f"🎌 {anime_id}\n"
+            f"📺 {season} | {ep_key} | {quality} | {size_mb}MB\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        link = forward_to_storage(f["chat_id"], f["msg_id"], caption)
+        if link:
+            quality_dict[quality] = link
+
+    saved_key = save_to_firebase(anime_id, season, ep_num, quality_dict)
+    session["done_eps"] += 1
+
+    if quality_dict:
+        q_lines = "\n".join([f"  • {q}: ✅" for q in quality_dict])
+        bot.send_message(chat_id, f"""
+✅ *{saved_key} Saved!*
+{q_lines}
+🔗 `anime_links/{anime_id}/{season}/{saved_key}`
+""", parse_mode="Markdown")
     else:
-        await msg.reply_text("❌ Sirf video, document, ya audio files bhejein.")
+        bot.send_message(chat_id, f"""
+❌ *{saved_key} Failed!*
+Bot ko storage channel ka *Admin* banao!
+""", parse_mode="Markdown")
+
+# ══════════════════════════════════════════════════════
+#   COMMANDS
+# ══════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["start"])
+def cmd_start(msg):
+    args = msg.text.split()
+
+    # User ne ?start=MSG_ID se open kiya → file deliver karo
+    if len(args) > 1:
+        try:
+            msg_id = int(args[1])
+            bot.copy_message(
+                chat_id      = msg.chat.id,
+                from_chat_id = STORAGE_CHANNEL,
+                message_id   = msg_id,
+            )
+        except Exception as e:
+            print(f"Delivery error: {e}")
+            bot.reply_to(msg, "❌ File nahi mili. Link expire ho gaya ya galat hai.")
         return
 
-    processing = await msg.reply_text("⏳ Processing...")
-    try:
-        forwarded = await context.bot.copy_message(
-            chat_id=STORAGE_CHANNEL,
-            from_chat_id=msg.chat_id,
-            message_id=msg.message_id,
-        )
-        storage_msg_id = forwarded.message_id
-        stream_link = make_stream_link(storage_msg_id, filename)
-        file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
+    # Admin ka /start — help dikhao
+    if msg.from_user.id == ALLOWED_USER:
+        bot.reply_to(msg, """
+🎌 *AnimeVerse Upload Bot v2*
+━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        await processing.delete()
-        await msg.reply_text(
-            f"✅ *File Saved Successfully!*\n\n"
-            f"📁 *File:* `{filename}`\n"
-            f"📦 *Size:* {file_size_mb} MB\n"
-            f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
-            f"🔗 *Streaming Link:*\n`{stream_link}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]),
-        )
-    except Exception as e:
-        await processing.edit_text(f"❌ Error: {e}")
+*Step 1:* `/setup anime-id S1`
+*Step 2:* Saari files forward karo ek saath
+*Step 3:* `/done` jab sab bhej do
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+*Other commands:*
+📋 `/status` — buffer dekho
+🔍 `/check anime-id S1 5`
+🔄 `/reset`
+""", parse_mode="Markdown")
 
 
-async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
+@bot.message_handler(commands=["help"])
+def cmd_help(msg):
+    if msg.from_user.id != ALLOWED_USER:
         return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Usage: `/getlink <message_id> <filename>`", parse_mode="Markdown")
+    bot.reply_to(msg, "📌 Commands: /setup /status /done /reset /check")
+
+
+@bot.message_handler(commands=["setup"])
+def cmd_setup(msg):
+    if msg.from_user.id != ALLOWED_USER:
         return
     try:
-        msg_id = int(args[0])
-        filename = " ".join(args[1:])
-        link = make_stream_link(msg_id, filename)
-        await update.message.reply_text(
-            f"🔗 *Link:*\n`{link}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open", url=link)]]),
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Invalid message ID.")
+        parts    = msg.text.split()
+        anime_id = parts[1]
+        season   = parts[2].upper()
+        reset_all()
+        session["anime_id"] = anime_id
+        session["season"]   = season
+        bot.reply_to(msg, f"""
+✅ *Setup Done!*
+📺 Anime: `{anime_id}`
+🎬 Season: `{season}`
+
+Ab saari files ek saath forward karo! 🚀
+Bot caption dekh ke khud group karega.
+""", parse_mode="Markdown")
+    except:
+        bot.reply_to(msg, "❌ Format: `/setup anime-id S1`", parse_mode="Markdown")
 
 
-# ── FASTAPI ───────────────────────────────────────────
+@bot.message_handler(commands=["done"])
+def cmd_done(msg):
+    if msg.from_user.id != ALLOWED_USER:
+        return
+    pending = list(ep_buffer.keys())
+    if pending:
+        bot.reply_to(msg, f"⚙️ *{len(pending)} pending episodes process ho rahe hain...*",
+                     parse_mode="Markdown")
+        for ep_num in sorted(pending):
+            files = ep_buffer.pop(ep_num)
+            process_ep(msg.chat.id, ep_num, files)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global pyro
-    pyro = Client("stream_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-    await pyro.start()
-    logger.info("Pyrogram client started.")
-    yield
-    await pyro.stop()
+    total = session["done_eps"]
+    bot.send_message(msg.chat.id, f"""
+🏁 *Sab Complete!*
+✅ *{total} episodes* Firebase mein save!
+📺 `{session['anime_id']}` | `{session['season']}`
 
-
-web_app = FastAPI(title="TG Stream Server", lifespan=lifespan)
-
-
-@web_app.get("/")
-async def index():
-    return HTMLResponse("""
-    <html><body style='font-family:sans-serif;text-align:center;padding:80px;background:#0f0f0f;color:#fff'>
-    <h1>🎬 TG Stream Server</h1><p style='color:#aaa'>Online ✅</p>
-    </body></html>
-    """)
+Naya season ke liye `/setup` karo.
+""", parse_mode="Markdown")
 
 
-@web_app.get("/dl/{msg_id}/{filename:path}")
-async def stream_file(msg_id: int, filename: str, code: str, request: Request):
-    decoded = urllib.parse.unquote(filename)
+@bot.message_handler(commands=["status"])
+def cmd_status(msg):
+    if msg.from_user.id != ALLOWED_USER:
+        return
+    if not session["anime_id"]:
+        bot.reply_to(msg, "ℹ️ Koi session nahi.\n`/setup anime-id S1` se shuru karo.")
+        return
+    lines = [
+        f"📋 *Status:*\n━━━━━━━━━━━━━━━━━━━━",
+        f"📺 `{session['anime_id']}` | `{session['season']}`",
+        f"✅ Saved: `{session['done_eps']} episodes`",
+        f"⏳ Buffer: `{len(ep_buffer)} episodes`\n"
+    ]
+    for ep_num in sorted(ep_buffer.keys()):
+        files = ep_buffer[ep_num]
+        quals = [f["quality"] for f in files]
+        lines.append(f"  E{ep_num}: {', '.join(quals)} ({len(files)}/{QUALITIES_PER_EP})")
+    bot.reply_to(msg, "\n".join(lines), parse_mode="Markdown")
 
-    if not verify_code(msg_id, decoded, code):
-        raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
+@bot.message_handler(commands=["reset"])
+def cmd_reset(msg):
+    if msg.from_user.id != ALLOWED_USER:
+        return
+    reset_all()
+    bot.reply_to(msg, "🔄 *Reset done!* `/setup anime-id S1` se shuru karo.", parse_mode="Markdown")
+
+
+@bot.message_handler(commands=["check"])
+def cmd_check(msg):
+    if msg.from_user.id != ALLOWED_USER:
+        return
     try:
-        # FIXED: Pyrogram Client ka use karke bina list unpacking ke message fetch kiya
-        message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Error: {e}")
+        parts    = msg.text.split()
+        anime_id = parts[1]
+        season   = parts[2].upper()
+        ep_num   = str(parts[3])
+        data = db.reference(f"anime_links/{anime_id}/{season}/E{ep_num}").get()
+        if data:
+            lines = [f"📊 *{anime_id} | {season} | E{ep_num}*\n━━━━━━━━━━━━━━━━"]
+            for q, link in data.items():
+                lines.append(f"• {q}: `{str(link)[:55]}`")
+            bot.reply_to(msg, "\n".join(lines), parse_mode="Markdown")
+        else:
+            bot.reply_to(msg, f"❌ E{ep_num} Firebase mein nahi mila")
+    except:
+        bot.reply_to(msg, "❌ Format: `/check anime-id S1 5`", parse_mode="Markdown")
 
-    if not message or message.empty:
-        raise HTTPException(status_code=404, detail="Message not found.")
+# ══════════════════════════════════════════════════════
+#   FILE HANDLER
+# ══════════════════════════════════════════════════════
 
-    media = message.video or message.document or message.audio or message.video_note
-    if not media:
-        raise HTTPException(status_code=404, detail="No media in message.")
+@bot.message_handler(content_types=["document", "video"])
+def handle_file(msg):
+    if msg.from_user.id != ALLOWED_USER:
+        return
 
-    file_size = media.file_size
-    mime_type = getattr(media, "mime_type", "application/octet-stream")
+    if not session["anime_id"]:
+        bot.reply_to(msg, "❌ Pehle `/setup anime-id S1` karo!", parse_mode="Markdown")
+        return
 
-    CHUNK_SIZE = 1024 * 1024  # 1MB
+    file_obj  = msg.document or msg.video
+    file_size = file_obj.file_size or 0
+    file_name = getattr(file_obj, "file_name", None) or "video"
+    caption   = msg.caption or ""
 
-    range_header = request.headers.get("range")
-    start = 0
-    end = file_size - 1
+    # Sirf episode number detect karo (quality size se assign hogi)
+    ep_num, _ = parse_caption(caption)
+    if not ep_num:
+        ep_num, _ = parse_caption(file_name)
 
-    if range_header:
-        parts = range_header.replace("bytes=", "").split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end = int(parts[1]) if parts[1] else file_size - 1
+    if not ep_num:
+        bot.reply_to(msg, f"⚠️ *Episode detect nahi hua!*\nCaption: `{caption[:80]}`\nCaption mein `Episode - 04` ya `E04` hona chahiye.", parse_mode="Markdown")
+        return
 
-    content_length = end - start + 1
-    offset = start // CHUNK_SIZE
-    first_chunk_cut = start % CHUNK_SIZE
-    limit = math.ceil(content_length / CHUNK_SIZE) + 1
+    quality = "pending"  # Size se assign hogi process_ep mein
 
-    # FIXED: UnicodeEncodeError se bachne ke liye filename ko UTF-8 URL encode kiya gaya hai
-    safe_filename = urllib.parse.quote(decoded)
+    # Buffer mein add
+    if ep_num not in ep_buffer:
+        ep_buffer[ep_num] = []
 
-    response_headers = {
-        "Content-Type": mime_type,
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}",
-        "Content-Length": str(content_length),
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-    }
+    # Duplicate file check — same size ki file dobara aayi?
+    existing_sizes = [f["size"] for f in ep_buffer[ep_num]]
+    if file_size in existing_sizes:
+        bot.reply_to(msg, f"⚠️ *{ep_key} — Same file dobara aai! Skip kar raha hoon.*", parse_mode="Markdown")
+        return
 
-    async def generator():
-        bytes_sent = 0
-        chunk_index = 0
-        async for chunk in pyro.stream_media(message, offset=offset, limit=limit):
-            if chunk_index == 0:
-                chunk = chunk[first_chunk_cut:]
-            if bytes_sent + len(chunk) > content_length:
-                chunk = chunk[:content_length - bytes_sent]
-            yield chunk
-            bytes_sent += len(chunk)
-            chunk_index += 1
-            if bytes_sent >= content_length:
-                break
+    ep_buffer[ep_num].append({
+        "chat_id": msg.chat.id,
+        "msg_id" : msg.message_id,
+        "size"   : file_size,
+        "quality": quality,
+        "name"   : file_name,
+    })
 
-    status_code = 206 if range_header else 200
-    logger.info(f"Streaming msg_id={msg_id} | {decoded} | {start}-{end}/{file_size}")
-    return StreamingResponse(generator(), status_code=status_code, headers=response_headers)
+    count   = len(ep_buffer[ep_num])
+    size_mb = round(file_size / (1024 * 1024), 1)
+    ep_key  = f"E{ep_num}"
 
+    if count >= QUALITIES_PER_EP:
+        bot.reply_to(msg, f"""
+📥 `{quality}` | `{size_mb}MB`
+⚙️ *{ep_key} complete! Save ho raha hai...*
+""", parse_mode="Markdown")
+        files = ep_buffer.pop(ep_num)
+        process_ep(msg.chat.id, ep_num, files)
+    else:
+        remaining = QUALITIES_PER_EP - count
+        bot.reply_to(msg, f"""
+📥 `{quality}` | `{size_mb}MB`
+📦 *{ep_key}:* {count}/{QUALITIES_PER_EP} | aur *{remaining}* chahiye
+""", parse_mode="Markdown")
 
-# ── MAIN ──────────────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#   RUN
+# ══════════════════════════════════════════════════════
 
-async def run_bot():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("getlink", get_link_cmd))
-    app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VIDEO_NOTE,
-        handle_media,
-    ))
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Bot started polling.")
-    return app
+print("=" * 50)
+print("  🤖 AnimeVerse Bot v2 — Caption Mode")
+print(f"  📦 Storage: t.me/c/{_cid}/")
+print("  Ctrl+C se band karo")
+print("=" * 50)
 
-
-async def run_server():
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-
-async def main():
-    bot_app = await run_bot()
-    try:
-        await run_server()
-    finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+bot.polling(none_stop=True, interval=1)

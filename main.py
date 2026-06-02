@@ -1,9 +1,12 @@
+"""
+main.py — Runs both the Telegram bot and the FastAPI stream server
+in a single Railway service using asyncio.
+"""
+import asyncio
 import os
 import hashlib
 import logging
 import urllib.parse
-import asyncio
-import math
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -20,6 +23,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# ─── CONFIG ────────────────────────────────────────────────────────────────
 BOT_TOKEN        = os.getenv("BOT_TOKEN", "")
 API_ID           = int(os.getenv("API_ID", "0"))
 API_HASH         = os.getenv("API_HASH", "")
@@ -28,35 +32,50 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
+# ───────────────────────────────────────────────────────────────────────────
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
+# Shared Pyrogram client
 pyro: Client = None
 
 
-def is_allowed(user_id):
+# ══════════════════════════════════════════════════════
+#  HELPER FUNCTIONS
+# ══════════════════════════════════════════════════════
+
+def is_allowed(user_id: int) -> bool:
     if not ALLOWED_USERS.strip():
         return True
     return str(user_id) in [u.strip() for u in ALLOWED_USERS.split(",")]
 
 
-def generate_code(msg_id, filename):
+def generate_code(msg_id: int, filename: str) -> str:
     raw = f"{SECRET_KEY}:{msg_id}:{filename}"
     return hashlib.md5(raw.encode()).hexdigest()[:24]
 
 
-def make_stream_link(msg_id, filename):
+def clean_filename(name: str) -> str:
+    return name.strip()
+
+
+def make_stream_link(msg_id: int, filename: str) -> str:
     safe = urllib.parse.quote(filename)
     code = generate_code(msg_id, filename)
     return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}"
 
 
-def verify_code(msg_id, filename, code):
+def verify_code(msg_id: int, filename: str, code: str) -> bool:
     return generate_code(msg_id, filename) == code
 
 
-# ── BOT HANDLERS ──────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  TELEGRAM BOT HANDLERS
+# ══════════════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
@@ -65,7 +84,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Video Storage Bot*\n\n"
         "Koi bhi video/document bhejo — main use private channel mein save kar ke "
-        "aapko ek *streaming link* deta hoon.\n\nBas file bhejo! 🚀",
+        "aapko ek *streaming link* deta hoon.\n\n"
+        "📌 *Supported:* Video, Document, Audio\n\n"
+        "Bas file bhejo! 🚀",
         parse_mode="Markdown",
     )
 
@@ -73,8 +94,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     msg = update.message
-    file_obj, filename = None, "video"
+    file_obj = None
+    filename = "video"
 
     if msg.video:
         file_obj = msg.video
@@ -93,15 +116,21 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     processing = await msg.reply_text("⏳ Processing...")
+
     try:
-        forwarded = await context.bot.copy_message(
+        # Pyrogram se forward karo — koi size limit nahi
+        forwarded = await pyro.copy_message(
             chat_id=STORAGE_CHANNEL,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
         )
-        storage_msg_id = forwarded.message_id
+        storage_msg_id = forwarded.id
         stream_link = make_stream_link(storage_msg_id, filename)
         file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Stream / Download", url=stream_link)],
+        ])
 
         await processing.delete()
         await msg.reply_text(
@@ -111,10 +140,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
             f"🔗 *Streaming Link:*\n`{stream_link}`",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]),
+            reply_markup=keyboard,
         )
     except Exception as e:
         await processing.edit_text(f"❌ Error: {e}")
+        logger.error(f"handle_media error: {e}")
 
 
 async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,7 +152,9 @@ async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("Usage: `/getlink <message_id> <filename>`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "Usage: `/getlink <message_id> <filename>`", parse_mode="Markdown"
+        )
         return
     try:
         msg_id = int(args[0])
@@ -137,7 +169,9 @@ async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid message ID.")
 
 
-# ── FASTAPI ───────────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  FASTAPI STREAM SERVER
+# ══════════════════════════════════════════════════════
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -169,7 +203,6 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
         raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
     try:
-        # FIXED: Pyrogram Client ka use karke bina list unpacking ke message fetch kiya
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
         await asyncio.sleep(e.value)
@@ -187,53 +220,38 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
     file_size = media.file_size
     mime_type = getattr(media, "mime_type", "application/octet-stream")
 
-    CHUNK_SIZE = 1024 * 1024  # 1MB
-
     range_header = request.headers.get("range")
-    start = 0
-    end = file_size - 1
+    offset, limit, status_code = 0, None, 200
+
+    response_headers = {
+        "Content-Type": mime_type,
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'inline; filename="{decoded}"',
+        "Content-Length": str(file_size),
+    }
 
     if range_header:
         parts = range_header.replace("bytes=", "").split("-")
         start = int(parts[0]) if parts[0] else 0
         end = int(parts[1]) if parts[1] else file_size - 1
-
-    content_length = end - start + 1
-    offset = start // CHUNK_SIZE
-    first_chunk_cut = start % CHUNK_SIZE
-    limit = math.ceil(content_length / CHUNK_SIZE) + 1
-
-    # FIXED: UnicodeEncodeError se bachne ke liye filename ko UTF-8 URL encode kiya gaya hai
-    safe_filename = urllib.parse.quote(decoded)
-
-    response_headers = {
-        "Content-Type": mime_type,
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}",
-        "Content-Length": str(content_length),
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-    }
+        chunk_size = 1024 * 1024
+        offset = start // chunk_size
+        limit = ((end - start) // chunk_size) + 1
+        response_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        response_headers["Content-Length"] = str(end - start + 1)
+        status_code = 206
 
     async def generator():
-        bytes_sent = 0
-        chunk_index = 0
         async for chunk in pyro.stream_media(message, offset=offset, limit=limit):
-            if chunk_index == 0:
-                chunk = chunk[first_chunk_cut:]
-            if bytes_sent + len(chunk) > content_length:
-                chunk = chunk[:content_length - bytes_sent]
             yield chunk
-            bytes_sent += len(chunk)
-            chunk_index += 1
-            if bytes_sent >= content_length:
-                break
 
-    status_code = 206 if range_header else 200
-    logger.info(f"Streaming msg_id={msg_id} | {decoded} | {start}-{end}/{file_size}")
+    logger.info(f"Streaming msg_id={msg_id} | {decoded}")
     return StreamingResponse(generator(), status_code=status_code, headers=response_headers)
 
 
-# ── MAIN ──────────────────────────────────────────────
+# ══════════════════════════════════════════════════════
+#  MAIN — Run both together
+# ══════════════════════════════════════════════════════
 
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()

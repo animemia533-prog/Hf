@@ -169,6 +169,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
         raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
     try:
+        # FIXED: Pyrogram Client ka use karke bina list unpacking ke message fetch kiya
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
         await asyncio.sleep(e.value)
@@ -202,10 +203,13 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
     first_chunk_cut = start % CHUNK_SIZE
     limit = math.ceil(content_length / CHUNK_SIZE) + 1
 
+    # FIXED: UnicodeEncodeError se bachne ke liye filename ko UTF-8 URL encode kiya gaya hai
+    safe_filename = urllib.parse.quote(decoded)
+
     response_headers = {
         "Content-Type": mime_type,
         "Accept-Ranges": "bytes",
-        "Content-Disposition": f'inline; filename="{decoded}"',
+        "Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}",
         "Content-Length": str(content_length),
         "Content-Range": f"bytes {start}-{end}/{file_size}",
     }

@@ -68,24 +68,51 @@ def verify_code(msg_id, filename, code):
 def extract_episode(text: str):
     """
     Caption ya filename se sirf episode NUMBER nikalta hai.
-    Supported formats:
-      Episode 7 / Episode 07
-      Ep 7 / Ep.07 / EP-7 / ep_07
-      E07 / E7
+
+    Priority order:
+      1. EPISODE/EP keyword ke baad number  → "EPISODE - 07", "EP04", "Ep.7", "ep_01"
+      2. E + number (standalone)            → "E09", "E40"
+      3. Standalone 1-2 digit number        → "07", "11", "40"
+         (season number S1/S2 pehle hata deta hai false match avoid karne ke liye)
+
     Returns int ya None.
     """
     if not text:
         return None
 
-    patterns = [
-        r'\bepisode[\s.\-_#]*(\d{1,3})\b',   # Episode 7 / Episode 07
-        r'\bep(?:isode)?[\s.\-_#]*(\d{1,3})\b',  # Ep 7 / ep.01 / EP-12
-        r'\be(\d{2,3})\b',                    # E07 / E12 (min 2 digits to avoid false match)
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return int(m.group(1))
+    t = text.upper()
+    ep_num = None
+
+    # Priority 1: EPISODE / EP keyword ke baad number
+    ep_match = re.search(r'\bEP(?:ISODE)?\s*[-:→►\s]*\s*(\d{1,3})\b', t)
+    if ep_match:
+        ep_num = int(ep_match.group(1))
+
+    # Priority 2: E + number (E09, E40)
+    if ep_num is None:
+        e_match = re.search(r'\bE(\d{1,3})\b', t)
+        if e_match:
+            ep_num = int(e_match.group(1))
+
+    # Priority 3: standalone 1-2 digit number
+    # (S1/S2 jaise season numbers hata ke false match avoid karo)
+    if ep_num is None:
+        cleaned = re.sub(r'\bS\d{1,2}\b', '', t)
+        nums = re.findall(r'\b(\d{1,2})\b', cleaned)
+        if nums:
+            ep_num = int(nums[0])
+
+    return ep_num
+
+
+def extract_quality(text: str):
+    """Caption/filename se quality nikalta hai: 480p / 720p / 1080p. Returns str ya None."""
+    if not text:
+        return None
+    q_match = re.search(r'\b(1080[Pp]|720[Pp]|480[Pp])\b', text)
+    if q_match:
+        val = q_match.group(1).lower()   # "1080p", "720p", "480p"
+        return val
     return None
 
 
@@ -198,11 +225,10 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Sirf video, document, ya audio files bhejein.")
         return
 
-    # ── Episode number nikalo (caption pehle, phir filename) ──
+    # ── Episode number nikalo: caption pehle, phir filename fallback ──
     caption_text = msg.caption or ""
-    ep_num = extract_episode(caption_text)
-
-    if ep_num is None and raw_name:
+    ep_num = extract_episode(caption_text)          # Step 1: caption se try karo
+    if ep_num is None and raw_name:                 # Step 2: caption mein nahi mila -> filename try
         ep_num = extract_episode(raw_name)
 
     # ── Filename banao ──

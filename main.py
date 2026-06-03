@@ -129,28 +129,52 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
 
 async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str) -> bool:
     """
-    Firebase REST API se save karta hai — koi key.json nahi chahiye.
-    Path: Animes/{slug}/{season}/E{ep_num} -> { link, server, time }
-    Firebase Realtime DB REST: PUT {db_url}/path.json?auth={secret}  (ya bina auth agar rules open hain)
+    Firebase REST API se do jagah save karta hai:
+    1. Animes/{slug}/{season}/E{ep_num}  → episode link
+    2. added_today/{YYYY-MM-DD}/{slug}   → aaj ka episode entry (index page ke liye)
     """
     try:
-        ep_key  = f"E{ep_num}"
-        db_url  = FIREBASE_URL.rstrip("/")
-        url     = f"{db_url}/Animes/{slug}/{season}/{ep_key}.json"
-        payload = {
-            "link"  : stream_link,
-            "server": SERVER_NAME,
-            "time"  : int(time.time()),
-        }
+        from datetime import datetime, timezone
+
+        ep_key     = f"E{ep_num}"
+        db_url     = FIREBASE_URL.rstrip("/")
+        now_ts     = int(time.time())
+        season_num = int(re.sub(r'[^\d]', '', season) or "1")
+        date_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         async with aiohttp.ClientSession() as session:
-            async with session.put(url, json=payload) as resp:
+
+            # ── 1. Animes/{slug}/{season}/E{ep_num} ──
+            url1 = f"{db_url}/Animes/{slug}/{season}/{ep_key}.json"
+            payload1 = {
+                "link"  : stream_link,
+                "server": SERVER_NAME,
+                "time"  : now_ts,
+            }
+            async with session.put(url1, json=payload1) as resp:
                 if resp.status == 200:
                     logger.info(f"Firebase saved: Animes/{slug}/{season}/{ep_key}")
-                    return True
                 else:
                     text = await resp.text()
-                    logger.error(f"Firebase error {resp.status}: {text}")
+                    logger.error(f"Firebase Animes error {resp.status}: {text}")
                     return False
+
+            # ── 2. added_today/{YYYY-MM-DD}/{slug} ──
+            url2 = f"{db_url}/added_today/{date_str}/{slug}.json"
+            payload2 = {
+                "e"        : ep_num,
+                "s"        : season_num,
+                "timestamp": now_ts,  # seconds mein (index.html yahi expect karta hai)
+            }
+            async with session.put(url2, json=payload2) as resp:
+                if resp.status == 200:
+                    logger.info(f"added_today saved: added_today/{date_str}/{slug} → S{season_num}E{ep_num}")
+                else:
+                    text = await resp.text()
+                    logger.warning(f"added_today save failed {resp.status}: {text}")
+
+        return True
+
     except Exception as e:
         logger.error(f"Firebase save error: {e}")
         return False
@@ -321,7 +345,10 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Episode info line (setup mode mein hi dikhao)
         ep_line = f"🎬 *Episode:* `E{ep_num}`\n" if setup and ep_num else ""
-        fb_line = f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{ep_num}`\n" if fb_saved else ""
+        fb_line = (
+            f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{ep_num}`\n"
+            f"📅 *Added Today:* ✅ Index page pe show hoga\n"
+        ) if fb_saved else ""
 
         await processing.delete()
         await msg.reply_text(
@@ -547,10 +574,4 @@ async def main():
     try:
         await asyncio.gather(run_server())
     finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        await bot_app.

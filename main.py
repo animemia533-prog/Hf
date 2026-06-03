@@ -134,7 +134,7 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
     Firebase Realtime DB REST: PUT {db_url}/path.json?auth={secret}  (ya bina auth agar rules open hain)
     """
     try:
-        ep_key  = f"E{str(ep_num).zfill(2)}"
+        ep_key  = f"E{ep_num}"
         db_url  = FIREBASE_URL.rstrip("/")
         url     = f"{db_url}/Animes/{slug}/{season}/{ep_key}.json"
         payload = {
@@ -165,7 +165,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Video Storage Bot*\n\n"
         "📌 *Setup karo:*\n`/setup <anime-slug> <season>`\n"
-        "_Example: /setup attack-on-titan S01_\n\n"
+        "_Example: /setup attack-on-titan 1_\n\n"
         "Phir video forward karo — caption mein episode number hona chahiye "
         "jaise `Episode 7`, `Ep 01`, `EP-12` etc.\n\n"
         "Bot automatically filename banayega! 🚀",
@@ -184,17 +184,22 @@ async def setup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "❌ *Usage:* `/setup <anime-slug> <season>`\n\n"
+            "❌ *Usage:* `/setup <anime-slug> <season-number>`\n\n"
             "*Examples:*\n"
-            "`/setup attack-on-titan S01`\n"
-            "`/setup mushoku-tensei S02`\n"
-            "`/setup one-piece S01`",
+            "`/setup attack-on-titan 1`\n"
+            "`/setup mushoku-tensei 2`\n"
+            "`/setup one-piece 7`",
             parse_mode="Markdown",
         )
         return
 
     slug = args[0].lower().strip()
-    season = args[1].upper().strip()
+    raw_season = args[1].strip()
+    # Sirf number diya (1,2,7) → S1,S2,S7 | S1/S01 diya → as-is uppercase
+    if raw_season.isdigit():
+        season = f"S{raw_season}"
+    else:
+        season = raw_season.upper()
 
     user_setup[update.effective_user.id] = {"slug": slug, "season": season}
     logger.info(f"User {update.effective_user.id} setup: slug={slug}, season={season}")
@@ -281,7 +286,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        ep_str = str(ep_num).zfill(2)           # 1→"01", 7→"07", 12→"12"
+        ep_str = str(ep_num)                    # 1→"1", 7→"7", 12→"12"
         ext = get_extension(raw_name, fallback="mp4" if (msg.video or msg.video_note) else "mkv")
         filename = f"{setup['slug']}-{setup['season']}-E{ep_str}.{ext}"
 
@@ -315,8 +320,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link)
 
         # Episode info line (setup mode mein hi dikhao)
-        ep_line = f"🎬 *Episode:* `E{str(ep_num).zfill(2)}`\n" if setup and ep_num else ""
-        fb_line = f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{str(ep_num).zfill(2)}`\n" if fb_saved else ""
+        ep_line = f"🎬 *Episode:* `E{ep_num}`\n" if setup and ep_num else ""
+        fb_line = f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{ep_num}`\n" if fb_saved else ""
 
         await processing.delete()
         await msg.reply_text(

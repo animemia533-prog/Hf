@@ -476,11 +476,14 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
     safe_filename = urllib.parse.quote(decoded)
 
     response_headers = {
-        "Content-Type":        mime_type,
-        "Accept-Ranges":       "bytes",
-        "Content-Disposition": f"inline; filename*=UTF-8''{safe_filename}",
-        "Content-Length":      str(content_length),
-        "Cache-Control":       "no-store",
+        "Content-Type":              mime_type,
+        "Accept-Ranges":             "bytes",
+        "Content-Disposition":       f"inline; filename*=UTF-8''{safe_filename}",
+        "Content-Length":            str(content_length),
+        "Cache-Control":             "no-store",
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Headers": "Range, Content-Type",
+        "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
     }
     if range_header:
         response_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"

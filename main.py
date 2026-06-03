@@ -574,4 +574,10 @@ async def main():
     try:
         await asyncio.gather(run_server())
     finally:
-        await bot_app.
+        await bot_app.updater.stop()
+        await bot_app.stop()
+        await bot_app.shutdown()
+ 
+ 
+if __name__ == "__main__":
+    asyncio.run(main())

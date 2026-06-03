@@ -5,7 +5,10 @@ import logging
 import urllib.parse
 import asyncio
 import math
+import time
 from contextlib import asynccontextmanager
+
+import aiohttp
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -31,6 +34,8 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
+FIREBASE_URL     = os.getenv("FIREBASE_URL", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+SERVER_NAME      = os.getenv("SERVER_NAME", "Player")  # Firebase mein server field ki value
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -120,6 +125,35 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
     if filename and "." in filename:
         return filename.rsplit(".", 1)[-1].lower()
     return fallback
+
+
+async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str) -> bool:
+    """
+    Firebase REST API se save karta hai — koi key.json nahi chahiye.
+    Path: Animes/{slug}/{season}/E{ep_num} -> { link, server, time }
+    Firebase Realtime DB REST: PUT {db_url}/path.json?auth={secret}  (ya bina auth agar rules open hain)
+    """
+    try:
+        ep_key  = f"E{str(ep_num).zfill(2)}"
+        db_url  = FIREBASE_URL.rstrip("/")
+        url     = f"{db_url}/Animes/{slug}/{season}/{ep_key}.json"
+        payload = {
+            "link"  : stream_link,
+            "server": SERVER_NAME,
+            "time"  : int(time.time()),
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.put(url, json=payload) as resp:
+                if resp.status == 200:
+                    logger.info(f"Firebase saved: Animes/{slug}/{season}/{ep_key}")
+                    return True
+                else:
+                    text = await resp.text()
+                    logger.error(f"Firebase error {resp.status}: {text}")
+                    return False
+    except Exception as e:
+        logger.error(f"Firebase save error: {e}")
+        return False
 
 
 # ── BOT HANDLERS ──────────────────────────────────────
@@ -275,14 +309,21 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stream_link = make_stream_link(storage_msg_id, filename)
         file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
 
+        # ── Firebase mein save karo (sirf setup mode mein) ──
+        fb_saved = False
+        if setup and ep_num:
+            fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link)
+
         # Episode info line (setup mode mein hi dikhao)
-        ep_line = f"🎬 *Episode:* `{ep_num}`\n" if setup and ep_num else ""
+        ep_line = f"🎬 *Episode:* `E{str(ep_num).zfill(2)}`\n" if setup and ep_num else ""
+        fb_line = f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{str(ep_num).zfill(2)}`\n" if fb_saved else ""
 
         await processing.delete()
         await msg.reply_text(
             f"✅ *File Saved Successfully!*\n\n"
             f"📁 *File:* `{filename}`\n"
             f"{ep_line}"
+            f"{fb_line}"
             f"📦 *Size:* {file_size_mb} MB\n"
             f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
             f"🔗 *Streaming Link:*\n`{stream_link}`",

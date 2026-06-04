@@ -46,6 +46,29 @@ pyro: Client = None
 # Format: { user_id: {"slug": "attack-on-titan", "season": "S01"} }
 user_setup: dict = {}
 
+# ── QUALITY BUFFER ─────────────────────────────────────
+# Jab tak QUALITY_COUNT videos nahi aate, yahan collect hote hain
+# Format: { user_id: { ep_num: [ {"size": bytes, "link": url, "filename": str, "sid": int}, ... ] } }
+quality_buffer: dict = {}
+QUALITY_COUNT = 3  # 480p, 720p, 1080p — teen videos collect karo phir save karo
+
+
+def assign_qualities(videos: list) -> dict:
+    """
+    Size ke hisab se quality assign karta hai.
+    videos = list of dicts with "size" key
+    Returns: { index: "1080p"/"720p"/"480p" }
+    """
+    sorted_vids = sorted(enumerate(videos), key=lambda x: x[1]["size"])
+    quality_names = ["480p", "720p", "1080p"]
+    # Agar 2 videos hain toh 480p aur 1080p
+    if len(sorted_vids) == 2:
+        quality_names = ["480p", "1080p"]
+    result = {}
+    for i, (orig_idx, _) in enumerate(sorted_vids):
+        result[orig_idx] = quality_names[i] if i < len(quality_names) else f"quality{i}"
+    return result
+
 
 # ── HELPERS ───────────────────────────────────────────
 
@@ -127,11 +150,12 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
     return fallback
 
 
-async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str) -> bool:
+async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None) -> bool:
     """
-    Firebase REST API se do jagah save karta hai:
-    1. Animes/{slug}/{season}/E{ep_num}  → episode link
-    2. added_today/{YYYY-MM-DD}/{slug}   → aaj ka episode entry (index page ke liye)
+    Firebase mein save karta hai.
+    Quality diya → Animes/{slug}/{season}/E{ep_num}/{quality}
+    Quality nahi → Animes/{slug}/{season}/E{ep_num}  (purana behavior)
+    Saath mein added_today mein bhi save karta hai.
     """
     try:
         from datetime import datetime, timezone
@@ -142,36 +166,42 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
         season_num = int(re.sub(r'[^\d]', '', season) or "1")
         date_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        async with aiohttp.ClientSession() as session:
+        # Path: quality ho toh nested, warna flat
+        if quality:
+            ep_path = f"Animes/{slug}/{season}/{ep_key}/{quality}"
+        else:
+            ep_path = f"Animes/{slug}/{season}/{ep_key}"
 
-            # ── 1. Animes/{slug}/{season}/E{ep_num} ──
-            url1 = f"{db_url}/Animes/{slug}/{season}/{ep_key}.json"
-            payload1 = {
-                "link"  : stream_link,
-                "server": SERVER_NAME,
-                "time"  : now_ts,
-            }
+        url1 = f"{db_url}/{ep_path}.json"
+        payload1 = {
+            "link"  : stream_link,
+            "server": SERVER_NAME,
+            "time"  : now_ts,
+        }
+
+        async with aiohttp.ClientSession() as session:
             async with session.put(url1, json=payload1) as resp:
                 if resp.status == 200:
-                    logger.info(f"Firebase saved: Animes/{slug}/{season}/{ep_key}")
+                    logger.info(f"Firebase saved: {ep_path}")
                 else:
                     text = await resp.text()
-                    logger.error(f"Firebase Animes error {resp.status}: {text}")
+                    logger.error(f"Firebase error {resp.status}: {text}")
                     return False
 
-            # ── 2. added_today/{YYYY-MM-DD}/{slug} ──
-            url2 = f"{db_url}/added_today/{date_str}/{slug}.json"
-            payload2 = {
-                "e"        : ep_num,
-                "s"        : season_num,
-                "timestamp": now_ts,  # seconds mein (index.html yahi expect karta hai)
-            }
-            async with session.put(url2, json=payload2) as resp:
-                if resp.status == 200:
-                    logger.info(f"added_today saved: added_today/{date_str}/{slug} → S{season_num}E{ep_num}")
-                else:
-                    text = await resp.text()
-                    logger.warning(f"added_today save failed {resp.status}: {text}")
+            # added_today mein save (sirf ek baar — 1080p pe ya quality=None pe)
+            if quality is None or quality == "1080p":
+                url2 = f"{db_url}/added_today/{date_str}/{slug}.json"
+                payload2 = {
+                    "e"        : ep_num,
+                    "s"        : season_num,
+                    "timestamp": now_ts,
+                }
+                async with session.put(url2, json=payload2) as resp:
+                    if resp.status == 200:
+                        logger.info(f"added_today saved: {date_str}/{slug} S{season_num}E{ep_num}")
+                    else:
+                        text = await resp.text()
+                        logger.warning(f"added_today failed {resp.status}: {text}")
 
         return True
 
@@ -242,7 +272,9 @@ async def clear_setup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/clearsetup — user ka setup clear karta hai"""
     if not is_allowed(update.effective_user.id):
         return
-    user_setup.pop(update.effective_user.id, None)
+    uid = update.effective_user.id
+    user_setup.pop(uid, None)
+    quality_buffer.pop(uid, None)  # buffer bhi clear karo
     await update.message.reply_text("🗑️ Setup clear ho gaya. `/setup` se naya set karo.", parse_mode="Markdown")
 
 
@@ -288,17 +320,15 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Sirf video, document, ya audio files bhejein.")
         return
 
-    # ── Episode number nikalo: caption pehle, phir filename fallback ──
+    # ── Episode number nikalo ──
     caption_text = msg.caption or ""
-    ep_num = extract_episode(caption_text)          # Step 1: caption se try karo
-    if ep_num is None and raw_name:                 # Step 2: caption mein nahi mila -> filename try
+    ep_num = extract_episode(caption_text)
+    if ep_num is None and raw_name:
         ep_num = extract_episode(raw_name)
 
-    # ── Filename banao ──
     setup = user_setup.get(uid)
 
     if setup:
-        # Setup hai — episode number zaroori hai
         if ep_num is None:
             await msg.reply_text(
                 "⚠️ *Episode number nahi mila!*\n\n"
@@ -310,63 +340,114 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        ep_str = str(ep_num)                    # 1→"1", 7→"7", 12→"12"
         ext = get_extension(raw_name, fallback="mp4" if (msg.video or msg.video_note) else "mkv")
-        filename = f"{setup['slug']}-{setup['season']}-E{ep_str}.{ext}"
+        file_size = file_obj.file_size or 0
+
+        processing = await msg.reply_text("⏳ Processing...")
+
+        try:
+            forwarded = await context.bot.copy_message(
+                chat_id=STORAGE_CHANNEL,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
+            storage_msg_id = forwarded.message_id
+
+            # ── Quality buffer mein add karo ──
+            if uid not in quality_buffer:
+                quality_buffer[uid] = {}
+            if ep_num not in quality_buffer[uid]:
+                quality_buffer[uid][ep_num] = []
+
+            quality_buffer[uid][ep_num].append({
+                "size"    : file_size,
+                "sid"     : storage_msg_id,
+                "ext"     : ext,
+            })
+
+            collected = len(quality_buffer[uid][ep_num])
+            await processing.delete()
+
+            if collected < QUALITY_COUNT:
+                # Abhi aur videos chahiye
+                remaining = QUALITY_COUNT - collected
+                await msg.reply_text(
+                    f"✅ *Video {collected}/{QUALITY_COUNT} mila!*\n\n"
+                    f"🎬 *Episode:* `E{ep_num}`\n"
+                    f"📦 *Size:* {round(file_size/(1024*1024), 2)} MB\n\n"
+                    f"⏳ Abhi aur *{remaining}* video{'s' if remaining > 1 else ''} bhejo is episode ke liye...",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # ── Teeno aa gaye — quality assign karo aur save karo ──
+            videos = quality_buffer[uid][ep_num]
+            quality_map = assign_qualities(videos)
+
+            results = []
+            for i, vid in enumerate(videos):
+                quality = quality_map[i]
+                filename = f"{setup['slug']}-{setup['season']}-E{ep_num}-{quality}.{vid['ext']}"
+                stream_link = make_stream_link(vid["sid"], filename)
+                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality)
+                results.append({
+                    "quality" : quality,
+                    "link"    : stream_link,
+                    "size_mb" : round(vid["size"] / (1024*1024), 2),
+                    "saved"   : fb_saved,
+                })
+
+            # Buffer clear karo
+            del quality_buffer[uid][ep_num]
+
+            # ── Success message ──
+            quality_lines = "\n".join([
+                f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n  `{r['link']}`"
+                for r in sorted(results, key=lambda x: x["quality"], reverse=True)
+            ])
+
+            await msg.reply_text(
+                f"🎉 *Teeno Quality Save Ho Gayi!*\n\n"
+                f"🎌 *Anime:* `{setup['slug']}`\n"
+                f"📺 *Season:* `{setup['season']}`\n"
+                f"🎬 *Episode:* `E{ep_num}`\n"
+                f"📅 *Added Today:* ✅\n\n"
+                f"🔗 *Links:*\n{quality_lines}",
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"handle_media error: {e}")
+            await msg.reply_text(f"❌ Error: {e}")
 
     else:
-        # No setup — original naming fallback
-        if msg.video:
-            filename = raw_name or f"video_{file_obj.file_unique_id}.mp4"
-        elif msg.document:
-            filename = raw_name or f"doc_{file_obj.file_unique_id}"
-        elif msg.audio:
-            filename = raw_name or f"audio_{file_obj.file_unique_id}.mp3"
-        else:
-            filename = f"videonote_{file_obj.file_unique_id}.mp4"
-
-    # ── Processing ──
-    processing = await msg.reply_text("⏳ Processing...")
-
-    try:
-        forwarded = await context.bot.copy_message(
-            chat_id=STORAGE_CHANNEL,
-            from_chat_id=msg.chat_id,
-            message_id=msg.message_id,
-        )
-        storage_msg_id = forwarded.message_id
-        stream_link = make_stream_link(storage_msg_id, filename)
-        file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
-
-        # ── Firebase mein save karo (sirf setup mode mein) ──
-        fb_saved = False
-        if setup and ep_num:
-            fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link)
-
-        # Episode info line (setup mode mein hi dikhao)
-        ep_line = f"🎬 *Episode:* `E{ep_num}`\n" if setup and ep_num else ""
-        fb_line = (
-            f"🔥 *Firebase:* `Animes/{setup['slug']}/{setup['season']}/E{ep_num}`\n"
-            f"📅 *Added Today:* ✅ Index page pe show hoga\n"
-        ) if fb_saved else ""
-
-        await processing.delete()
-        await msg.reply_text(
-            f"✅ *File Saved Successfully!*\n\n"
-            f"📁 *File:* `{filename}`\n"
-            f"{ep_line}"
-            f"{fb_line}"
-            f"📦 *Size:* {file_size_mb} MB\n"
-            f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
-            f"🔗 *Streaming Link:*\n`{stream_link}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]
-            ),
-        )
-    except Exception as e:
-        logger.error(f"handle_media error: {e}")
-        await processing.edit_text(f"❌ Error: {e}")
+        # ── No setup — original behavior ──
+        filename = raw_name or f"video_{file_obj.file_unique_id}.mp4"
+        processing = await msg.reply_text("⏳ Processing...")
+        try:
+            forwarded = await context.bot.copy_message(
+                chat_id=STORAGE_CHANNEL,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
+            storage_msg_id = forwarded.message_id
+            stream_link = make_stream_link(storage_msg_id, filename)
+            file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
+            await processing.delete()
+            await msg.reply_text(
+                f"✅ *File Saved!*\n\n"
+                f"📁 *File:* `{filename}`\n"
+                f"📦 *Size:* {file_size_mb} MB\n"
+                f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
+                f"🔗 *Streaming Link:*\n`{stream_link}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]
+                ),
+            )
+        except Exception as e:
+            logger.error(f"handle_media error: {e}")
+            await processing.edit_text(f"❌ Error: {e}")
 
 
 async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,98 +567,4 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
     mime_type = getattr(media, "mime_type", "application/octet-stream")
     CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB — faster initial load
 
-    range_header = request.headers.get("range")
-    start = 0
-    end = file_size - 1
-
-    if range_header:
-        parts = range_header.replace("bytes=", "").split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end   = int(parts[1]) if parts[1] else file_size - 1
-
-    content_length   = end - start + 1
-    offset           = start // CHUNK_SIZE
-    first_chunk_cut  = start % CHUNK_SIZE
-    limit            = math.ceil(content_length / CHUNK_SIZE)
-
-    safe_filename = urllib.parse.quote(decoded)
-
-    response_headers = {
-        "Content-Type":              mime_type,
-        "Accept-Ranges":             "bytes",
-        "Content-Disposition":       f"inline; filename*=UTF-8''{safe_filename}",
-        "Content-Length":            str(content_length),
-        "Cache-Control":             "no-store",
-        "Access-Control-Allow-Origin":  "*",
-        "Access-Control-Allow-Headers": "Range, Content-Type",
-        "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
-    }
-    if range_header:
-        response_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-
-    async def generator():
-        bytes_sent  = 0
-        chunk_index = 0
-        try:
-            async for chunk in pyro.stream_media(message, offset=offset, limit=limit):
-                if chunk_index == 0:
-                    chunk = chunk[first_chunk_cut:]
-                remaining = content_length - bytes_sent
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-                yield chunk
-                bytes_sent  += len(chunk)
-                chunk_index += 1
-                if bytes_sent >= content_length:
-                    break
-        except Exception as e:
-            logger.error(f"Stream error msg_id={msg_id}: {e}")
-
-    status_code = 206 if range_header else 200
-    logger.info(f"Streaming msg_id={msg_id} | {decoded} | bytes {start}-{end}/{file_size}")
-    return StreamingResponse(generator(), status_code=status_code, headers=response_headers)
-
-
-# ── MAIN ──────────────────────────────────────────────
-
-async def run_bot():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # Commands
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("setup",       setup_cmd))
-    app.add_handler(CommandHandler("mysetup",     current_setup_cmd))
-    app.add_handler(CommandHandler("clearsetup",  clear_setup_cmd))
-    app.add_handler(CommandHandler("getlink",     get_link_cmd))
-
-    # Media handler
-    app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VIDEO_NOTE,
-        handle_media,
-    ))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Bot started polling.")
-    return app
-
-
-async def run_server():
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-
-async def main():
-    bot_app = await run_bot()
-    try:
-        await asyncio.gather(run_server())
-    finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
- 
- 
-if __name__ == "__main__":
-    asyncio.run(main())
+    range_header = request.headers

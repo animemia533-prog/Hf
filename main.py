@@ -89,6 +89,12 @@ def make_stream_link(msg_id, filename):
     return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}"
 
 
+def make_download_link(msg_id, filename):
+    safe = urllib.parse.quote(filename)
+    code = generate_code(msg_id, filename)
+    return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}&dl=1"
+
+
 def verify_code(msg_id, filename, code):
     return generate_code(msg_id, filename) == code
 
@@ -389,10 +395,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quality = quality_map[i]
                 filename = f"{setup['slug']}-{setup['season']}-E{ep_num}-{quality}.{vid['ext']}"
                 stream_link = make_stream_link(vid["sid"], filename)
+                download_link = make_download_link(vid["sid"], filename)
                 fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality)
                 results.append({
                     "quality" : quality,
                     "link"    : stream_link,
+                    "dl_link" : download_link,
                     "size_mb" : round(vid["size"] / (1024*1024), 2),
                     "saved"   : fb_saved,
                 })
@@ -402,7 +410,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── Success message ──
             quality_lines = "\n".join([
-                f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n  `{r['link']}`"
+                f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n"
+                f"  ▶️ Stream: `{r['link']}`\n"
+                f"  ⬇️ Download: `{r['dl_link']}`"
                 for r in sorted(results, key=lambda x: x["quality"], reverse=True)
             ])
 
@@ -432,6 +442,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             storage_msg_id = forwarded.message_id
             stream_link = make_stream_link(storage_msg_id, filename)
+            download_link = make_download_link(storage_msg_id, filename)
             file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
             await processing.delete()
             await msg.reply_text(
@@ -439,11 +450,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📁 *File:* `{filename}`\n"
                 f"📦 *Size:* {file_size_mb} MB\n"
                 f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
-                f"🔗 *Streaming Link:*\n`{stream_link}`",
+                f"▶️ *Stream Link:*\n`{stream_link}`\n\n"
+                f"⬇️ *Download Link:*\n`{download_link}`",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]
-                ),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶️ Stream", url=stream_link)],
+                    [InlineKeyboardButton("⬇️ Download", url=download_link)],
+                ]),
             )
         except Exception as e:
             logger.error(f"handle_media error: {e}")
@@ -542,7 +555,7 @@ async def watch_file(msg_id: int, filename: str, code: str):
 
 
 @web_app.get("/dl/{msg_id}/{filename:path}")
-async def stream_file(msg_id: int, filename: str, code: str, request: Request):
+async def stream_file(msg_id: int, filename: str, code: str, request: Request, dl: int = 0):
     decoded = urllib.parse.unquote(filename)
 
     if not verify_code(msg_id, decoded, code):
@@ -552,114 +565,4 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request):
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Error: {e}")
-
-    if not message or message.empty:
-        raise HTTPException(status_code=404, detail="Message not found.")
-
-    media = message.video or message.document or message.audio or message.video_note
-    if not media:
-        raise HTTPException(status_code=404, detail="No media in message.")
-
-    file_size = media.file_size
-    mime_type = getattr(media, "mime_type", "application/octet-stream")
-    CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB — faster initial load
-
-    range_header = request.headers.get("range")
-    start = 0
-    end = file_size - 1
-
-    if range_header:
-        parts = range_header.replace("bytes=", "").split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end   = int(parts[1]) if parts[1] else file_size - 1
-
-    content_length   = end - start + 1
-    offset           = start // CHUNK_SIZE
-    first_chunk_cut  = start % CHUNK_SIZE
-    limit            = math.ceil(content_length / CHUNK_SIZE)
-
-    safe_filename = urllib.parse.quote(decoded)
-
-    response_headers = {
-        "Content-Type":              mime_type,
-        "Accept-Ranges":             "bytes",
-        "Content-Disposition":       f"inline; filename*=UTF-8''{safe_filename}",
-        "Content-Length":            str(content_length),
-        "Cache-Control":             "no-store",
-        "Access-Control-Allow-Origin":  "*",
-        "Access-Control-Allow-Headers": "Range, Content-Type",
-        "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
-    }
-    if range_header:
-        response_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-
-    async def generator():
-        bytes_sent  = 0
-        chunk_index = 0
-        try:
-            async for chunk in pyro.stream_media(message, offset=offset, limit=limit):
-                if chunk_index == 0:
-                    chunk = chunk[first_chunk_cut:]
-                remaining = content_length - bytes_sent
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-                yield chunk
-                bytes_sent  += len(chunk)
-                chunk_index += 1
-                if bytes_sent >= content_length:
-                    break
-        except Exception as e:
-            logger.error(f"Stream error msg_id={msg_id}: {e}")
-
-    status_code = 206 if range_header else 200
-    logger.info(f"Streaming msg_id={msg_id} | {decoded} | bytes {start}-{end}/{file_size}")
-    return StreamingResponse(generator(), status_code=status_code, headers=response_headers)
-
-
-# ── MAIN ──────────────────────────────────────────────
-
-async def run_bot():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # Commands
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("setup",       setup_cmd))
-    app.add_handler(CommandHandler("mysetup",     current_setup_cmd))
-    app.add_handler(CommandHandler("clearsetup",  clear_setup_cmd))
-    app.add_handler(CommandHandler("getlink",     get_link_cmd))
-
-    # Media handler
-    app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VIDEO_NOTE,
-        handle_media,
-    ))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    logger.info("Bot started polling.")
-    return app
-
-
-async def run_server():
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-
-async def main():
-    bot_app = await run_bot()
-    try:
-        await asyncio.gather(run_server())
-    finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
+        message = await pyro.get_messages(STORAGE_C

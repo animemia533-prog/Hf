@@ -174,9 +174,9 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
 
         # Path: quality ho toh nested, warna flat
         if quality:
-            ep_path = f"Animes/{slug}/{season}/{ep_key}/{quality}"
+            ep_path = f"anime_links/{slug}/{season}/{ep_key}/{quality}"
         else:
-            ep_path = f"Animes/{slug}/{season}/{ep_key}"
+            ep_path = f"anime_links/{slug}/{season}/{ep_key}"
 
         url1 = f"{db_url}/{ep_path}.json"
         payload1 = {

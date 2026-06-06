@@ -156,7 +156,7 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
     return fallback
 
 
-async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None) -> bool:
+async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None, download_link: str = None) -> bool:
     """
     Firebase mein save karta hai.
     Quality diya → Animes/{slug}/{season}/E{ep_num}/{quality}
@@ -184,6 +184,8 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
             "server": SERVER_NAME,
             "time"  : now_ts,
         }
+        if download_link:
+            payload1["dl_link"] = download_link
 
         async with aiohttp.ClientSession() as session:
             async with session.put(url1, json=payload1) as resp:
@@ -396,7 +398,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filename = f"{setup['slug']}-{setup['season']}-E{ep_num}-{quality}.{vid['ext']}"
                 stream_link = make_stream_link(vid["sid"], filename)
                 download_link = make_download_link(vid["sid"], filename)
-                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality)
+                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality, download_link)
                 results.append({
                     "quality" : quality,
                     "link"    : stream_link,
@@ -563,7 +565,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 
     try:
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except FloodWait as e:
+        except FloodWait as e:
         await asyncio.sleep(e.value)
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except Exception as e:
@@ -675,5 +677,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 

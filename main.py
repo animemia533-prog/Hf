@@ -565,8 +565,8 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 
     try:
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-        except FloodWait as e:
-        await asyncio.sleep(e.value)
+except FloodWait as e:
+        await asyncio.sleep(e.x)
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Error: {e}")
@@ -677,4 +677,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
+    

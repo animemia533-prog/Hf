@@ -545,8 +545,7 @@ async def watch_file(msg_id: int, filename: str, code: str):
 <video
   src="{stream_url}"
   controls
-  autoplay
-  preload="auto"
+  preload="metadata"
   playsinline
   controlslist="nodownload"
 ></video>
@@ -579,7 +578,11 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
         raise HTTPException(status_code=404, detail="No media in message.")
 
     file_size = media.file_size
-    mime_type = getattr(media, "mime_type", "application/octet-stream")
+    mime_type = getattr(media, "mime_type", None)
+    ext = decoded.rsplit(".", 1)[-1].lower() if "." in decoded else ""
+    mime_map = {"mp4": "video/mp4", "mkv": "video/x-matroska", "webm": "video/webm", "avi": "video/x-msvideo", "mov": "video/quicktime"}
+    if not mime_type or mime_type == "application/octet-stream":
+        mime_type = mime_map.get(ext, "video/mp4")
     CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB — faster initial load
 
     range_header = request.headers.get("range")

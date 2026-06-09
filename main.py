@@ -564,7 +564,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     if not verify_code(msg_id, decoded, code):
         raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
-   try:
+    try:
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
         await asyncio.sleep(e.x)

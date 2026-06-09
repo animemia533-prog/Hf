@@ -34,8 +34,7 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
-FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
-STRING_SESSION   = os.getenv("STRING_SESSION", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+FIREBASE_URL     = os.getenv("FIREBASE_URL", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
 SERVER_NAME      = os.getenv("SERVER_NAME", "Player")  # Firebase mein server field ki value
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -88,12 +87,6 @@ def make_stream_link(msg_id, filename):
     safe = urllib.parse.quote(filename)
     code = generate_code(msg_id, filename)
     return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}"
-
-
-def make_download_link(msg_id, filename):
-    safe = urllib.parse.quote(filename)
-    code = generate_code(msg_id, filename)
-    return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}&dl=1"
 
 
 def verify_code(msg_id, filename, code):
@@ -157,7 +150,7 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
     return fallback
 
 
-async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None, download_link: str = None) -> bool:
+async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None) -> bool:
     """
     Firebase mein save karta hai.
     Quality diya → Animes/{slug}/{season}/E{ep_num}/{quality}
@@ -175,9 +168,9 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
 
         # Path: quality ho toh nested, warna flat
         if quality:
-            ep_path = f"anime_links/{slug}/{season}/{ep_key}/{quality}"
+            ep_path = f"Animes/{slug}/{season}/{ep_key}/{quality}"
         else:
-            ep_path = f"anime_links/{slug}/{season}/{ep_key}"
+            ep_path = f"Animes/{slug}/{season}/{ep_key}"
 
         url1 = f"{db_url}/{ep_path}.json"
         payload1 = {
@@ -185,8 +178,6 @@ async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str
             "server": SERVER_NAME,
             "time"  : now_ts,
         }
-        if download_link:
-            payload1["dl_link"] = download_link
 
         async with aiohttp.ClientSession() as session:
             async with session.put(url1, json=payload1) as resp:
@@ -398,12 +389,10 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quality = quality_map[i]
                 filename = f"{setup['slug']}-{setup['season']}-E{ep_num}-{quality}.{vid['ext']}"
                 stream_link = make_stream_link(vid["sid"], filename)
-                download_link = make_download_link(vid["sid"], filename)
-                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality, download_link)
+                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality)
                 results.append({
                     "quality" : quality,
                     "link"    : stream_link,
-                    "dl_link" : download_link,
                     "size_mb" : round(vid["size"] / (1024*1024), 2),
                     "saved"   : fb_saved,
                 })
@@ -413,9 +402,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── Success message ──
             quality_lines = "\n".join([
-                f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n"
-                f"  ▶️ Stream: `{r['link']}`\n"
-                f"  ⬇️ Download: `{r['dl_link']}`"
+                f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n  `{r['link']}`"
                 for r in sorted(results, key=lambda x: x["quality"], reverse=True)
             ])
 
@@ -445,7 +432,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             storage_msg_id = forwarded.message_id
             stream_link = make_stream_link(storage_msg_id, filename)
-            download_link = make_download_link(storage_msg_id, filename)
             file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
             await processing.delete()
             await msg.reply_text(
@@ -453,13 +439,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📁 *File:* `{filename}`\n"
                 f"📦 *Size:* {file_size_mb} MB\n"
                 f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
-                f"▶️ *Stream Link:*\n`{stream_link}`\n\n"
-                f"⬇️ *Download Link:*\n`{download_link}`",
+                f"🔗 *Streaming Link:*\n`{stream_link}`",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("▶️ Stream", url=stream_link)],
-                    [InlineKeyboardButton("⬇️ Download", url=download_link)],
-                ]),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("▶️ Stream / Download", url=stream_link)]]
+                ),
             )
         except Exception as e:
             logger.error(f"handle_media error: {e}")
@@ -495,8 +479,8 @@ async def lifespan(app: FastAPI):
         "stream_session",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=STRING_SESSION,
-        no_updates=True,
+        bot_token=BOT_TOKEN,
+        in_memory=True,
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
@@ -558,7 +542,7 @@ async def watch_file(msg_id: int, filename: str, code: str):
 
 
 @web_app.get("/dl/{msg_id}/{filename:path}")
-async def stream_file(msg_id: int, filename: str, code: str, request: Request, dl: int = 0):
+async def stream_file(msg_id: int, filename: str, code: str, request: Request):
     decoded = urllib.parse.unquote(filename)
 
     if not verify_code(msg_id, decoded, code):
@@ -567,7 +551,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     try:
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
-        await asyncio.sleep(e.x)
+        await asyncio.sleep(e.value)
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Error: {e}")
@@ -602,7 +586,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     response_headers = {
         "Content-Type":              mime_type,
         "Accept-Ranges":             "bytes",
-        "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{safe_filename}",
+        "Content-Disposition":       f"inline; filename*=UTF-8''{safe_filename}",
         "Content-Length":            str(content_length),
         "Cache-Control":             "no-store",
         "Access-Control-Allow-Origin":  "*",

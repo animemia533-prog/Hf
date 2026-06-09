@@ -34,7 +34,8 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
-FIREBASE_URL     = os.getenv("FIREBASE_URL", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
+STRING_SESSION   = os.getenv("STRING_SESSION", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
 SERVER_NAME      = os.getenv("SERVER_NAME", "Player")  # Firebase mein server field ki value
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -494,8 +495,8 @@ async def lifespan(app: FastAPI):
         "stream_session",
         api_id=API_ID,
         api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        in_memory=True,
+        session_string=STRING_SESSION,
+        no_updates=True,
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
@@ -563,7 +564,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     if not verify_code(msg_id, decoded, code):
         raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
-    try:
+   try:
         message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
     except FloodWait as e:
         await asyncio.sleep(e.x)

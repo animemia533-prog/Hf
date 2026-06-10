@@ -351,6 +351,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ext = get_extension(raw_name, fallback="mp4" if (msg.video or msg.video_note) else "mkv")
         file_size = file_obj.file_size or 0
 
+        # ── MKV warning ──
+        if ext == "mkv":
+            await msg.reply_text(
+                "⚠️ *MKV file detect hui!*\n\n"
+                "MKV format mobile browsers mein play *nahi* hota.\n"
+                "Please *MP4* format mein convert karke bhejo.\n\n"
+                "_Abhi bhi save kar raha hoon, lekin player mein nahi chalegi._",
+                parse_mode="Markdown",
+            )
+
         processing = await msg.reply_text("⏳ Processing...")
 
         try:
@@ -496,6 +506,9 @@ async def lifespan(app: FastAPI):
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         in_memory=True,
+        no_updates=True,
+        sleep_threshold=60,
+        max_concurrent_transmissions=8,
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
@@ -583,7 +596,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     mime_map = {"mp4": "video/mp4", "mkv": "video/x-matroska", "webm": "video/webm", "avi": "video/x-msvideo", "mov": "video/quicktime"}
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = mime_map.get(ext, "video/mp4")
-    CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB — faster initial load
+    CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB — smooth streaming
 
     range_header = request.headers.get("range")
     start = 0
@@ -606,7 +619,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
         "Accept-Ranges":             "bytes",
         "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{safe_filename}",
         "Content-Length":            str(content_length),
-        "Cache-Control":             "no-store",
+        "Cache-Control":             "public, max-age=3600",
         "Access-Control-Allow-Origin":  "*",
         "Access-Control-Allow-Headers": "Range, Content-Type",
         "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",

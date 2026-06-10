@@ -13,6 +13,7 @@ import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -41,6 +42,10 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 pyro: Client = None
+
+# 25002500 MESSAGE CACHE 2014 seek pe Telegram reconnect nahi hoga 25002500
+message_cache: dict = {}
+MESSAGE_CACHE_LIMIT = 50  # max 50 messages cache mein
 
 # ── IN-MEMORY USER SETUP STORE ────────────────────────
 # Format: { user_id: {"slug": "attack-on-titan", "season": "S01"} }
@@ -518,6 +523,15 @@ async def lifespan(app: FastAPI):
 
 web_app = FastAPI(title="TG Stream Server", lifespan=lifespan)
 
+# ── CORS — github.io se Railway URL load hogi ──
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "HEAD", "OPTIONS"],
+    allow_headers=["Range", "Content-Type", "Authorization"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Type"],
+)
+
 
 @web_app.get("/")
 async def index():
@@ -546,7 +560,7 @@ async def watch_file(msg_id: int, filename: str, code: str):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{safe_title}</title>
 <style>
-  * {{ margin:0; padding:0; box-sizing:border-box }}
+  * {{ margin:0; padding:0; box-sizing:border-box-sizing:border-box }}
   body {{ background:#000; display:flex; flex-direction:column; align-items:center;
           justify-content:center; min-height:100vh; font-family:sans-serif; color:#fff }}
   video {{ width:100%; max-width:960px; max-height:90vh; background:#000 }}
@@ -575,13 +589,23 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     if not verify_code(msg_id, decoded, code):
         raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
-    try:
-        message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except FloodWait as e:
-        await asyncio.sleep(e.x)
-        message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Error: {e}")
+    # Cache check — seek pe baar baar Telegram se fetch nahi hoga
+    if msg_id in message_cache:
+        message = message_cache[msg_id]
+    else:
+        try:
+            message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
+            # Cache mein save karo
+            if len(message_cache) >= MESSAGE_CACHE_LIMIT:
+                # Purana entry hata do
+                oldest = next(iter(message_cache))
+                del message_cache[oldest]
+            message_cache[msg_id] = message
+        except FloodWait as e:
+            await asyncio.sleep(e.x)
+            message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Error: {e}")
 
     if not message or message.empty:
         raise HTTPException(status_code=404, detail="Message not found.")
@@ -596,7 +620,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     mime_map = {"mp4": "video/mp4", "mkv": "video/x-matroska", "webm": "video/webm", "avi": "video/x-msvideo", "mov": "video/quicktime"}
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = mime_map.get(ext, "video/mp4")
-    CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB — smooth streaming
+    CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB — balance between seek speed and start time
 
     range_header = request.headers.get("range")
     start = 0
@@ -693,4 +717,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

@@ -16,7 +16,6 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pyrogram import Client
 from pyrogram.errors import FloodWait
-from telegram.error import RetryAfter, TimedOut, NetworkError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -166,44 +165,6 @@ def get_extension(filename: str, fallback: str = "mp4") -> str:
     if filename and "." in filename:
         return filename.rsplit(".", 1)[-1].lower()
     return fallback
-
-
-async def safe_copy_message(context, chat_id, from_chat_id, message_id, max_retries: int = 10):
-    """
-    copy_message ko FloodWait/RetryAfter-safe banata hai.
-
-    Bulk forward (pura season ek saath) ke time Telegram FloodWait /
-    RetryAfter error deta hai. Yeh function us error ko pakad ke
-    bataye gaye seconds tak wait karta hai aur phir khud retry karta hai —
-    isse seedha exception/crash nahi hota aur message eventually copy ho
-    jata hai, links khud-ba-khud ban jate hain.
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await context.bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=from_chat_id,
-                message_id=message_id,
-            )
-        except RetryAfter as e:
-            wait_time = float(e.retry_after) + 1
-            logger.warning(
-                f"FloodWait/RetryAfter: {wait_time:.1f}s wait kar raha hoon "
-                f"(attempt {attempt}/{max_retries}, message_id={message_id})"
-            )
-            await asyncio.sleep(wait_time)
-        except (TimedOut, NetworkError) as e:
-            wait_time = min(5 * attempt, 30)
-            logger.warning(
-                f"Network error, {wait_time}s baad retry (attempt {attempt}/{max_retries}): {e}"
-            )
-            await asyncio.sleep(wait_time)
-    # Last attempt — agar phir bhi fail hua to exception upar jaane do
-    return await context.bot.copy_message(
-        chat_id=chat_id,
-        from_chat_id=from_chat_id,
-        message_id=message_id,
-    )
 
 
 async def save_to_firebase(slug: str, season: str, ep_num: int, stream_link: str, quality: str = None, download_link: str = None) -> bool:
@@ -414,8 +375,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processing = await msg.reply_text("⏳ Processing...")
 
         try:
-            forwarded = await safe_copy_message(
-                context,
+            forwarded = await context.bot.copy_message(
                 chat_id=STORAGE_CHANNEL,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
@@ -501,8 +461,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = raw_name or f"video_{file_obj.file_unique_id}.mp4"
         processing = await msg.reply_text("⏳ Processing...")
         try:
-            forwarded = await safe_copy_message(
-                context,
+            forwarded = await context.bot.copy_message(
                 chat_id=STORAGE_CHANNEL,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,

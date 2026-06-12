@@ -639,7 +639,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     mime_map = {"mp4": "video/mp4", "mkv": "video/x-matroska", "webm": "video/webm", "avi": "video/x-msvideo", "mov": "video/quicktime"}
     if not mime_type or mime_type == "application/octet-stream":
         mime_type = mime_map.get(ext, "video/mp4")
-    CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB — balance between seek speed and start time
+    CHUNK_SIZE = 1 * 1024 * 1024  # 1 MB — smaller chunks = faster seek response
 
     range_header = request.headers.get("range")
     start = 0
@@ -649,6 +649,11 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
         parts = range_header.replace("bytes=", "").split("-")
         start = int(parts[0]) if parts[0] else 0
         end   = int(parts[1]) if parts[1] else file_size - 1
+
+    # Clamp to valid file bounds — out-of-range seeks were causing
+    # "Response content shorter than Content-Length" crashes
+    start = max(0, min(start, file_size - 1))
+    end   = max(start, min(end, file_size - 1))
 
     content_length   = end - start + 1
     offset           = start // CHUNK_SIZE
@@ -678,15 +683,26 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
                 if chunk_index == 0:
                     chunk = chunk[first_chunk_cut:]
                 remaining = content_length - bytes_sent
+                if remaining <= 0:
+                    break
                 if len(chunk) > remaining:
                     chunk = chunk[:remaining]
-                yield chunk
-                bytes_sent  += len(chunk)
+                if chunk:
+                    yield chunk
+                    bytes_sent += len(chunk)
                 chunk_index += 1
                 if bytes_sent >= content_length:
                     break
         except Exception as e:
             logger.error(f"Stream error msg_id={msg_id}: {e}")
+
+        # Pad with zero bytes if Telegram returned fewer bytes than promised,
+        # so Content-Length always matches and uvicorn doesn't raise/crash.
+        if bytes_sent < content_length:
+            logger.warning(
+                f"Stream short for msg_id={msg_id}: sent {bytes_sent}/{content_length} bytes, padding."
+            )
+            yield b"\x00" * (content_length - bytes_sent)
 
     status_code = 206 if range_header else 200
     logger.info(f"Streaming msg_id={msg_id} | {decoded} | bytes {start}-{end}/{file_size}")

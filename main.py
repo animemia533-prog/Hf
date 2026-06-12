@@ -100,6 +100,12 @@ def make_download_link(msg_id, filename):
     return f"{BASE_URL}/dl/{msg_id}/{safe}?code={code}&dl=1"
 
 
+def make_embed_link(msg_id, filename):
+    safe = urllib.parse.quote(filename)
+    code = generate_code(msg_id, filename)
+    return f"{BASE_URL}/watch/{msg_id}/{safe}?code={code}"
+
+
 def verify_code(msg_id, filename, code):
     return generate_code(msg_id, filename) == code
 
@@ -413,11 +419,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filename = f"{setup['slug']}-{setup['season']}-E{ep_num}-{quality}.{vid['ext']}"
                 stream_link = make_stream_link(vid["sid"], filename)
                 download_link = make_download_link(vid["sid"], filename)
+                embed_link = make_embed_link(vid["sid"], filename)
                 fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality, download_link)
                 results.append({
                     "quality" : quality,
                     "link"    : stream_link,
                     "dl_link" : download_link,
+                    "embed_link": embed_link,
                     "size_mb" : round(vid["size"] / (1024*1024), 2),
                     "saved"   : fb_saved,
                 })
@@ -429,6 +437,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quality_lines = "\n".join([
                 f"  {'✅' if r['saved'] else '⚠️'} *{r['quality']}* — {r['size_mb']} MB\n"
                 f"  ▶️ Stream: `{r['link']}`\n"
+                f"  🖼️ Embed: `{r['embed_link']}`\n"
                 f"  ⬇️ Download: `{r['dl_link']}`"
                 for r in sorted(results, key=lambda x: x["quality"], reverse=True)
             ])
@@ -460,6 +469,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             storage_msg_id = forwarded.message_id
             stream_link = make_stream_link(storage_msg_id, filename)
             download_link = make_download_link(storage_msg_id, filename)
+            embed_link = make_embed_link(storage_msg_id, filename)
             file_size_mb = round(file_obj.file_size / (1024 * 1024), 2) if file_obj.file_size else "?"
             await processing.delete()
             await msg.reply_text(
@@ -468,10 +478,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📦 *Size:* {file_size_mb} MB\n"
                 f"🆔 *Storage ID:* `{storage_msg_id}`\n\n"
                 f"▶️ *Stream Link:*\n`{stream_link}`\n\n"
+                f"🖼️ *Embed Link:*\n`{embed_link}`\n\n"
                 f"⬇️ *Download Link:*\n`{download_link}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("▶️ Stream", url=stream_link)],
+                    [InlineKeyboardButton("🖼️ Embed", url=embed_link)],
                     [InlineKeyboardButton("⬇️ Download", url=download_link)],
                 ]),
             )
@@ -491,10 +503,17 @@ async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_id = int(args[0])
         filename = " ".join(args[1:])
         link = make_stream_link(msg_id, filename)
+        embed_link = make_embed_link(msg_id, filename)
+        dl_link = make_download_link(msg_id, filename)
         await update.message.reply_text(
-            f"🔗 *Link:*\n`{link}`",
+            f"🔗 *Stream Link:*\n`{link}`\n\n"
+            f"🖼️ *Embed Link:*\n`{embed_link}`\n\n"
+            f"⬇️ *Download Link:*\n`{dl_link}`",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open", url=link)]]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Open", url=link)],
+                [InlineKeyboardButton("🖼️ Embed", url=embed_link)],
+            ]),
         )
     except ValueError:
         await update.message.reply_text("❌ Invalid message ID.")
@@ -560,7 +579,7 @@ async def watch_file(msg_id: int, filename: str, code: str):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{safe_title}</title>
 <style>
-  * {{ margin:0; padding:0; box-sizing:border-box-sizing:border-box }}
+  * {{ margin:0; padding:0; box-sizing:border-box }}
   body {{ background:#000; display:flex; flex-direction:column; align-items:center;
           justify-content:center; min-height:100vh; font-family:sans-serif; color:#fff }}
   video {{ width:100%; max-width:960px; max-height:90vh; background:#000 }}

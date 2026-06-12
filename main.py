@@ -602,7 +602,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
                 del message_cache[oldest]
             message_cache[msg_id] = message
         except FloodWait as e:
-            await asyncio.sleep(e.value)
+            await asyncio.sleep(e.x)
             message = await pyro.get_messages(STORAGE_CHANNEL, msg_id)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Error: {e}")
@@ -634,8 +634,6 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     content_length   = end - start + 1
     offset           = start // CHUNK_SIZE
     first_chunk_cut  = start % CHUNK_SIZE
-    # FIX: first_chunk_cut ke baad bhi poora content_length cover karne ke liye
-    # extra chunk chahiye ho sakta hai — isliye (content_length + first_chunk_cut) use karo
     limit            = math.ceil((content_length + first_chunk_cut) / CHUNK_SIZE)
 
     safe_filename = urllib.parse.quote(decoded)
@@ -663,39 +661,13 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
                 remaining = content_length - bytes_sent
                 if len(chunk) > remaining:
                     chunk = chunk[:remaining]
-                # FIX: empty chunk skip karo — warna Content-Length mismatch hoga
-                if chunk:
-                    yield chunk
-                    bytes_sent += len(chunk)
+                yield chunk
+                bytes_sent  += len(chunk)
                 chunk_index += 1
                 if bytes_sent >= content_length:
                     break
-        except FloodWait as e:
-            # FIX: FloodWait ke baad retry karo — silently fail mat karo
-            logger.warning(f"FloodWait {e.value}s during stream msg_id={msg_id}, retrying...")
-            await asyncio.sleep(e.value)
-            # Remaining bytes ke liye naya stream start karo
-            retry_offset    = (start + bytes_sent) // CHUNK_SIZE
-            retry_cut       = (start + bytes_sent) % CHUNK_SIZE
-            retry_remaining = content_length - bytes_sent
-            retry_limit     = math.ceil((retry_remaining + retry_cut) / CHUNK_SIZE)
-            retry_idx       = 0
-            async for chunk in pyro.stream_media(message, offset=retry_offset, limit=retry_limit):
-                if retry_idx == 0:
-                    chunk = chunk[retry_cut:]
-                rem = content_length - bytes_sent
-                if len(chunk) > rem:
-                    chunk = chunk[:rem]
-                if chunk:
-                    yield chunk
-                    bytes_sent += len(chunk)
-                retry_idx += 1
-                if bytes_sent >= content_length:
-                    break
         except Exception as e:
-            # FIX: Exception log karo — generator silently band nahi hoga
-            # (lekin Content-Length already set hai, toh uvicorn error throw karega — yeh expected hai)
-            logger.error(f"Stream error msg_id={msg_id} at byte {bytes_sent}/{content_length}: {e}")
+            logger.error(f"Stream error msg_id={msg_id}: {e}")
 
     status_code = 206 if range_header else 200
     logger.info(f"Streaming msg_id={msg_id} | {decoded} | bytes {start}-{end}/{file_size}")

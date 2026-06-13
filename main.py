@@ -161,6 +161,44 @@ def extract_quality(text: str):
     return None
 
 
+async def copy_with_floodwait(context, chat_id, from_chat_id, message_id, max_retries=10):
+    """
+    copy_message ko FloodWait-safe banata hai.
+    FloodWait aaye toh bataye gaye seconds wait karega, fir wahi se retry karega.
+    """
+    for attempt in range(max_retries):
+        try:
+            return await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+            )
+        except FloodWait as e:
+            logger.warning(f"FloodWait: {e.x}s wait kar raha hoon (attempt {attempt+1})")
+            await asyncio.sleep(e.x + 1)
+        except Exception as e:
+            err_str = str(e)
+            m = re.search(r'(?:flood|retry).*?(\d+)\s*sec', err_str, re.IGNORECASE)
+            if m:
+                wait_s = int(m.group(1))
+                logger.warning(f"FloodWait (text): {wait_s}s wait kar raha hoon (attempt {attempt+1})")
+                await asyncio.sleep(wait_s + 1)
+                continue
+            raise
+    raise RuntimeError("Max retries exceeded for copy_message (FloodWait loop).")
+
+
+async def save_to_firebase_with_retry(slug, season, ep_num, stream_link, quality=None, download_link=None, max_retries=10):
+    """save_to_firebase ko FloodWait-safe banata hai."""
+    for attempt in range(max_retries):
+        try:
+            return await save_to_firebase(slug, season, ep_num, stream_link, quality, download_link)
+        except FloodWait as e:
+            logger.warning(f"FloodWait (firebase): {e.x}s wait kar raha hoon (attempt {attempt+1})")
+            await asyncio.sleep(e.x + 1)
+    return False
+
+
 def get_extension(filename: str, fallback: str = "mp4") -> str:
     if filename and "." in filename:
         return filename.rsplit(".", 1)[-1].lower()
@@ -375,7 +413,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processing = await msg.reply_text("⏳ Processing...")
 
         try:
-            forwarded = await context.bot.copy_message(
+            forwarded = await copy_with_floodwait(
+                context,
                 chat_id=STORAGE_CHANNEL,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
@@ -420,7 +459,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 stream_link = make_stream_link(vid["sid"], filename)
                 download_link = make_download_link(vid["sid"], filename)
                 embed_link = make_embed_link(vid["sid"], filename)
-                fb_saved = await save_to_firebase(setup["slug"], setup["season"], ep_num, stream_link, quality, download_link)
+
+                # Already saved hai toh skip karo (resume support)
+                if vid.get("fb_saved"):
+                    fb_saved = True
+                else:
+                    fb_saved = await save_to_firebase_with_retry(
+                        setup["slug"], setup["season"], ep_num, stream_link, quality, download_link
+                    )
+                    vid["fb_saved"] = fb_saved
+
                 results.append({
                     "quality" : quality,
                     "link"    : stream_link,
@@ -461,7 +509,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = raw_name or f"video_{file_obj.file_unique_id}.mp4"
         processing = await msg.reply_text("⏳ Processing...")
         try:
-            forwarded = await context.bot.copy_message(
+            forwarded = await copy_with_floodwait(
+                context,
                 chat_id=STORAGE_CHANNEL,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
@@ -493,7 +542,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
+ if not is_allowed(update.effective_user.id):
         return
     args = context.args
     if len(args) < 2:

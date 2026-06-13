@@ -542,7 +542,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
- if not is_allowed(update.effective_user.id):
+    if not is_allowed(update.effective_user.id):
         return
     args = context.args
     if len(args) < 2:

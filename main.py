@@ -763,6 +763,10 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Pehle purana webhook/polling session clear karo — Conflict error fix
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook cleared, polling shuru ho raha hai...")
+
     # Commands
     app.add_handler(CommandHandler("start",       start))
     app.add_handler(CommandHandler("setup",       setup_cmd))

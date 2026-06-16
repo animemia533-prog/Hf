@@ -586,11 +586,10 @@ async def lifespan(app: FastAPI):
     await pyro.start()
     logger.info("Pyrogram client started.")
 
-    # Startup pe channel warm up karo — Pyrogram ko channel pata chal jayega
+    # Startup pe channel warm up karo — get_messages se channel Pyrogram ko pata chal jayega
     # aur purane msg_id bhi fetch ho sakenge (Peer id invalid fix)
     try:
-        async for _ in pyro.get_chat_history(STORAGE_CHANNEL, limit=1):
-            pass
+        await pyro.get_messages(STORAGE_CHANNEL, 1)
         logger.info(f"Channel {STORAGE_CHANNEL} warm up ho gaya.")
     except Exception as e:
         logger.warning(f"Channel warm up failed (ignore kar sakte hain): {e}")
@@ -772,6 +771,10 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Purana polling session clear karo — Conflict error fix
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook cleared, polling shuru ho raha hai...")
 
     # Commands
     app.add_handler(CommandHandler("start",       start))

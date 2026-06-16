@@ -35,8 +35,9 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
-FIREBASE_URL     = os.getenv("FIREBASE_URL", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
-SERVER_NAME      = os.getenv("SERVER_NAME", "Player")  # Firebase mein server field ki value
+FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
+SERVER_NAME      = os.getenv("SERVER_NAME", "Player")
+SESSION_STRING   = os.getenv("SESSION_STRING", "")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,6 +109,53 @@ def make_embed_link(msg_id, filename):
 
 def verify_code(msg_id, filename, code):
     return generate_code(msg_id, filename) == code
+
+
+# ── FIREBASE STATE SAVE / LOAD ─────────────────────────
+
+async def save_state_to_firebase():
+    """user_setup aur quality_buffer Firebase mein save karta hai."""
+    if not FIREBASE_URL:
+        return
+    try:
+        db_url = FIREBASE_URL.rstrip("/")
+        setup_data = {str(k): v for k, v in user_setup.items()}
+        buffer_data = {
+            str(uid): {str(ep): vids for ep, vids in eps.items()}
+            for uid, eps in quality_buffer.items()
+        }
+        payload = {"user_setup": setup_data, "quality_buffer": buffer_data}
+        async with aiohttp.ClientSession() as session:
+            async with session.put(f"{db_url}/bot_state.json", json=payload) as resp:
+                if resp.status == 200:
+                    logger.info("State Firebase mein save ho gaya.")
+                else:
+                    logger.warning(f"State save failed: {resp.status}")
+    except Exception as e:
+        logger.error(f"save_state_to_firebase error: {e}")
+
+
+async def load_state_from_firebase():
+    """Firebase se user_setup aur quality_buffer load karta hai."""
+    if not FIREBASE_URL:
+        return
+    try:
+        db_url = FIREBASE_URL.rstrip("/")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{db_url}/bot_state.json") as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json()
+                if not data:
+                    return
+                for k, v in data.get("user_setup", {}).items():
+                    user_setup[int(k)] = v
+                for uid_str, eps in data.get("quality_buffer", {}).items():
+                    uid = int(uid_str)
+                    quality_buffer[uid] = {int(ep): vids for ep, vids in eps.items()}
+                logger.info(f"State load ho gaya. Users: {len(user_setup)}, Buffers: {len(quality_buffer)}")
+    except Exception as e:
+        logger.error(f"load_state_from_firebase error: {e}")
 
 
 def extract_episode(text: str):
@@ -314,6 +362,7 @@ async def setup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_setup[update.effective_user.id] = {"slug": slug, "season": season}
     logger.info(f"User {update.effective_user.id} setup: slug={slug}, season={season}")
+    await save_state_to_firebase()
 
     await update.message.reply_text(
         f"✅ *Setup Saved!*\n\n"
@@ -331,7 +380,8 @@ async def clear_setup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     uid = update.effective_user.id
     user_setup.pop(uid, None)
-    quality_buffer.pop(uid, None)  # buffer bhi clear karo
+    quality_buffer.pop(uid, None)
+    await save_state_to_firebase()
     await update.message.reply_text("🗑️ Setup clear ho gaya. `/setup` se naya set karo.", parse_mode="Markdown")
 
 
@@ -432,6 +482,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "sid"     : storage_msg_id,
                 "ext"     : ext,
             })
+            await save_state_to_firebase()
 
             collected = len(quality_buffer[uid][ep_num])
             await processing.delete()
@@ -480,6 +531,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Buffer clear karo
             del quality_buffer[uid][ep_num]
+            await save_state_to_firebase()
 
             # ── Success message ──
             quality_lines = "\n".join([
@@ -577,7 +629,7 @@ async def lifespan(app: FastAPI):
         "stream_session",
         api_id=API_ID,
         api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
+        session_string=SESSION_STRING,
         in_memory=True,
         no_updates=True,
         sleep_threshold=60,
@@ -585,6 +637,17 @@ async def lifespan(app: FastAPI):
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
+
+    # Channel resolve karo
+    try:
+        chat = await pyro.get_chat(STORAGE_CHANNEL)
+        logger.info(f"Channel resolve ho gaya: {chat.title}")
+    except Exception as e:
+        logger.warning(f"Channel resolve failed: {e}")
+
+    # Firebase se state load karo
+    await load_state_from_firebase()
+
     yield
     await pyro.stop()
 
@@ -710,11 +773,12 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     limit            = math.ceil((content_length + first_chunk_cut) / CHUNK_SIZE)
 
     safe_filename = urllib.parse.quote(decoded)
+    download_filename = urllib.parse.quote(f"animeverse-{decoded}")
 
     response_headers = {
         "Content-Type":              mime_type,
         "Accept-Ranges":             "bytes",
-        "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{safe_filename}",
+        "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{download_filename if dl else safe_filename}",
         "Content-Length":            str(content_length),
         "Cache-Control":             "public, max-age=3600",
         "Access-Control-Allow-Origin":  "*",
@@ -763,7 +827,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Pehle purana webhook/polling session clear karo — Conflict error fix
+    # Conflict error fix
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook cleared, polling shuru ho raha hai...")
 

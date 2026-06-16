@@ -585,6 +585,16 @@ async def lifespan(app: FastAPI):
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
+
+    # Startup pe channel warm up karo — Pyrogram ko channel pata chal jayega
+    # aur purane msg_id bhi fetch ho sakenge (Peer id invalid fix)
+    try:
+        async for _ in pyro.get_chat_history(STORAGE_CHANNEL, limit=1):
+            pass
+        logger.info(f"Channel {STORAGE_CHANNEL} warm up ho gaya.")
+    except Exception as e:
+        logger.warning(f"Channel warm up failed (ignore kar sakte hain): {e}")
+
     yield
     await pyro.stop()
 
@@ -609,22 +619,6 @@ async def index():
     </body></html>
     """)
 
-
-
-@web_app.get("/debug-key")
-async def debug_key():
-    import hashlib
-    old_filename = "that-time-i-got-reincarnated-as-a-slime-S1-E24-1080p.mkv"
-    old_msg_id = 3339
-    expected_code = hashlib.md5(f"{SECRET_KEY}:{old_msg_id}:{old_filename}".encode()).hexdigest()[:24]
-    correct = expected_code == "22bbb58b2a1cb1cf8df06531"
-    return {
-        "secret_key": SECRET_KEY,
-        "expected_code": expected_code,
-        "original_code": "22bbb58b2a1cb1cf8df06531",
-        "match": correct,
-        "verdict": "✅ SECRET_KEY sahi hai" if correct else "❌ SECRET_KEY galat hai — yahi problem hai"
-    }
 
 
 @web_app.get("/watch/{msg_id}/{filename:path}")

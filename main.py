@@ -611,6 +611,22 @@ async def index():
 
 
 
+@web_app.get("/debug-key")
+async def debug_key():
+    import hashlib
+    old_filename = "that-time-i-got-reincarnated-as-a-slime-S1-E24-1080p.mkv"
+    old_msg_id = 3339
+    expected_code = hashlib.md5(f"{SECRET_KEY}:{old_msg_id}:{old_filename}".encode()).hexdigest()[:24]
+    correct = expected_code == "22bbb58b2a1cb1cf8df06531"
+    return {
+        "secret_key": SECRET_KEY,
+        "expected_code": expected_code,
+        "original_code": "22bbb58b2a1cb1cf8df06531",
+        "match": correct,
+        "verdict": "✅ SECRET_KEY sahi hai" if correct else "❌ SECRET_KEY galat hai — yahi problem hai"
+    }
+
+
 @web_app.get("/watch/{msg_id}/{filename:path}")
 async def watch_file(msg_id: int, filename: str, code: str):
     """HTML5 player page — preload=auto se fast buffering"""
@@ -762,10 +778,6 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # Pehle purana webhook/polling session clear karo — Conflict error fix
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook cleared, polling shuru ho raha hai...")
 
     # Commands
     app.add_handler(CommandHandler("start",       start))

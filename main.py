@@ -35,9 +35,8 @@ SECRET_KEY       = os.getenv("SECRET_KEY", "mysecretkey123")
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 PORT             = int(os.getenv("PORT", 8000))
 ALLOWED_USERS    = os.getenv("ALLOWED_USERS", "")
-FIREBASE_URL     = os.getenv("FIREBASE_URL", "")
-SERVER_NAME      = os.getenv("SERVER_NAME", "Player")
-SESSION_STRING   = os.getenv("SESSION_STRING", "")
+FIREBASE_URL     = os.getenv("FIREBASE_URL", "")  # e.g. https://animeverse-9eada-default-rtdb.firebaseio.com
+SERVER_NAME      = os.getenv("SERVER_NAME", "Player")  # Firebase mein server field ki value
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,7 +113,6 @@ def verify_code(msg_id, filename, code):
 # ── FIREBASE STATE SAVE / LOAD ─────────────────────────
 
 async def save_state_to_firebase():
-    """user_setup aur quality_buffer Firebase mein save karta hai."""
     if not FIREBASE_URL:
         return
     try:
@@ -136,7 +134,6 @@ async def save_state_to_firebase():
 
 
 async def load_state_from_firebase():
-    """Firebase se user_setup aur quality_buffer load karta hai."""
     if not FIREBASE_URL:
         return
     try:
@@ -629,7 +626,7 @@ async def lifespan(app: FastAPI):
         "stream_session",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=SESSION_STRING,
+        bot_token=BOT_TOKEN,
         in_memory=True,
         no_updates=True,
         sleep_threshold=60,
@@ -637,17 +634,7 @@ async def lifespan(app: FastAPI):
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
-
-    # Channel resolve karo
-    try:
-        chat = await pyro.get_chat(STORAGE_CHANNEL)
-        logger.info(f"Channel resolve ho gaya: {chat.title}")
-    except Exception as e:
-        logger.warning(f"Channel resolve failed: {e}")
-
-    # Firebase se state load karo
     await load_state_from_firebase()
-
     yield
     await pyro.stop()
 
@@ -773,12 +760,11 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
     limit            = math.ceil((content_length + first_chunk_cut) / CHUNK_SIZE)
 
     safe_filename = urllib.parse.quote(decoded)
-    download_filename = urllib.parse.quote(f"animeverse-{decoded}")
 
     response_headers = {
         "Content-Type":              mime_type,
         "Accept-Ranges":             "bytes",
-        "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{download_filename if dl else safe_filename}",
+        "Content-Disposition":       f"{'attachment' if dl else 'inline'}; filename*=UTF-8''{safe_filename}",
         "Content-Length":            str(content_length),
         "Cache-Control":             "public, max-age=3600",
         "Access-Control-Allow-Origin":  "*",
@@ -827,7 +813,7 @@ async def stream_file(msg_id: int, filename: str, code: str, request: Request, d
 async def run_bot():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Conflict error fix
+    # Pehle purana webhook/polling session clear karo — Conflict error fix
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook cleared, polling shuru ho raha hai...")
 

@@ -622,14 +622,11 @@ async def get_link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pyro
-    SESSION_STRING = os.getenv("SESSION_STRING", "")
-
     pyro = Client(
         "stream_session",
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
-        session_string=SESSION_STRING if SESSION_STRING else None,
         in_memory=True,
         no_updates=True,
         sleep_threshold=60,
@@ -637,14 +634,6 @@ async def lifespan(app: FastAPI):
     )
     await pyro.start()
     logger.info("Pyrogram client started.")
-
-    # Peer cache fix — restart ke baad peer_id invalid error rokta hai
-    try:
-        await pyro.get_chat(STORAGE_CHANNEL)
-        logger.info(f"Storage channel resolved: {STORAGE_CHANNEL}")
-    except Exception as e:
-        logger.warning(f"Channel resolve warning: {e}")
-
     await load_state_from_firebase()
     yield
     await pyro.stop()
